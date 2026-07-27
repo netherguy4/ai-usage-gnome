@@ -147,8 +147,12 @@ export default class AiUsageExtension extends Extension {
             summary.push({
                 icon: providerIcon(account.provider),
                 remaining: headline === null ? null : effectiveRemaining(headline),
+                // У провайдера может не быть лимитов вовсе — только баланс.
+                // Тогда в панель идут деньги, иначе аккаунт выглядел бы сломанным.
+                balance: headline === null && hasBalances
+                    ? formatMoney(account.balances[0].total, account.balances[0].currency)
+                    : null,
                 stale,
-                broken: account.status === 'error' || account.status === 'unauthenticated',
             });
         });
 
@@ -261,9 +265,12 @@ function panelLabel(summary) {
         return 'AI';
 
     const parts = summary.map(entry => {
-        if (entry.remaining === null)
-            return `${entry.icon} !`;
-        return `${entry.icon} ${Math.round(entry.remaining)}%${entry.stale ? '~' : ''}`;
+        const mark = entry.stale ? '~' : '';
+        if (entry.remaining !== null)
+            return `${entry.icon} ${Math.round(entry.remaining)}%${mark}`;
+        if (entry.balance)
+            return `${entry.icon} ${entry.balance}${mark}`;
+        return `${entry.icon} !`;
     });
     return parts.join(' ');
 }
