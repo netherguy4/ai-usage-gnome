@@ -72,7 +72,11 @@ echo "Checksum verified: $ARCHIVE_NAME"
 tar -xzf "$ARCHIVE" -C "$TMP"
 PACKAGE_DIR="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d -name 'ai-usage-gnome-*' | head -n1)"
 [[ -n "$PACKAGE_DIR" ]] || { echo "Invalid release archive" >&2; exit 1; }
-if [[ -r /dev/tty && -w /dev/tty ]]; then
+# Скрипт обычно запускают как `curl ... | bash`, поэтому stdin занят пайпом и
+# интерактивный setup читать неоткуда. Подставляем /dev/tty, но только если он
+# действительно открывается: файл может существовать, а управляющего терминала
+# у процесса не быть, и тогда перенаправление свалит запуск целиком.
+if (exec 3</dev/tty) 2>/dev/null; then
   exec "$PACKAGE_DIR/install.sh" "$@" </dev/tty
 fi
 exec "$PACKAGE_DIR/install.sh" "$@"

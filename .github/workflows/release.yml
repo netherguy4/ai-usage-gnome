@@ -139,7 +139,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS --generate-notes --verify-tag
+        run: |
+          # Пометка prerelease важна не только для витрины: install-online.sh
+          # берёт /releases/latest, который prerelease не возвращает, поэтому
+          # rc не попадёт к пользователям установки одной командой.
+          EXTRA=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            EXTRA+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+            --generate-notes --verify-tag "${EXTRA[@]}"
 
       - name: Keep manual build artifacts
         if: github.ref_type != 'tag'
