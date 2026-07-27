@@ -2,10 +2,22 @@ use serde::{Deserialize, Serialize};
 
 /// Формат `state.json`. Несовместимое изменение требует увеличения версии и
 /// либо обратной совместимости UI, либо явной миграции.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2: вместо фиксированных `five_hour`/`weekly` — открытый список `windows`.
+/// Провайдеры добавляют и убирают лимиты (например, отдельный недельный лимит
+/// на конкретную модель), и зашитый набор полей заставлял бы править код на
+/// каждое такое изменение.
+pub const SCHEMA_VERSION: u32 = 2;
+
+pub const FIVE_HOUR_MINS: u64 = 300;
+pub const WEEKLY_MINS: u64 = 10_080;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaWindow {
+    /// Ключ провайдера как есть: `five_hour`, `seven_day_opus`, `primary`.
+    pub key: String,
+    /// Готовая к показу подпись.
+    pub label: String,
     pub used_percent: f64,
     pub remaining_percent: f64,
     pub duration_mins: Option<u64>,
@@ -13,7 +25,13 @@ pub struct QuotaWindow {
 }
 
 impl QuotaWindow {
-    pub fn new(used_percent: f64, duration_mins: Option<u64>, resets_at: Option<i64>) -> Self {
+    pub fn new(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        used_percent: f64,
+        duration_mins: Option<u64>,
+        resets_at: Option<i64>,
+    ) -> Self {
         // NaN не сравнивается, поэтому clamp его не спасёт: считаем такой
         // процент отсутствующим и показываем полный лимит.
         let used_percent = if used_percent.is_nan() {
@@ -22,11 +40,26 @@ impl QuotaWindow {
             used_percent.clamp(0.0, 100.0)
         };
         Self {
+            key: key.into(),
+            label: label.into(),
             used_percent,
             remaining_percent: 100.0 - used_percent,
             duration_mins,
             resets_at,
         }
+    }
+}
+
+/// Человеческая подпись окна по длительности. Используется провайдерами,
+/// которые сообщают длительность, но не имя (Codex).
+pub fn label_for_duration(duration_mins: Option<u64>) -> String {
+    match duration_mins {
+        Some(FIVE_HOUR_MINS) => "5 часов".to_owned(),
+        Some(WEEKLY_MINS) => "Неделя".to_owned(),
+        Some(mins) if mins % (60 * 24) == 0 => format!("{} д", mins / (60 * 24)),
+        Some(mins) if mins % 60 == 0 => format!("{} ч", mins / 60),
+        Some(mins) => format!("{mins} мин"),
+        None => "Лимит".to_owned(),
     }
 }
 
@@ -47,8 +80,9 @@ pub struct AccountState {
     pub plan: Option<String>,
     pub email: Option<String>,
     pub model: Option<String>,
-    pub five_hour: Option<QuotaWindow>,
-    pub weekly: Option<QuotaWindow>,
+    /// Все лимиты, которые вернул провайдер, в порядке показа.
+    #[serde(default)]
+    pub windows: Vec<QuotaWindow>,
     pub balances: Vec<BalanceInfo>,
     pub error: Option<String>,
     pub updated_at: i64,
@@ -64,8 +98,7 @@ impl AccountState {
             plan: None,
             email: None,
             model: None,
-            five_hour: None,
-            weekly: None,
+            windows: Vec::new(),
             balances: Vec::new(),
             error: Some(message.into()),
             updated_at: crate::util::unix_now(),
@@ -73,7 +106,7 @@ impl AccountState {
     }
 
     fn has_data(&self) -> bool {
-        self.five_hour.is_some() || self.weekly.is_some() || !self.balances.is_empty()
+        !self.windows.is_empty() || !self.balances.is_empty()
     }
 }
 
@@ -123,8 +156,7 @@ pub fn merge_with_previous(
                 plan: old.plan.clone(),
                 email: old.email.clone(),
                 model: old.model.clone(),
-                five_hour: old.five_hour.clone(),
-                weekly: old.weekly.clone(),
+                windows: old.windows.clone(),
                 balances: old.balances.clone(),
                 updated_at: old.updated_at,
                 ..account
@@ -137,8 +169,8 @@ pub fn merge_with_previous(
 mod tests {
     use super::*;
 
-    fn window(used: f64) -> QuotaWindow {
-        QuotaWindow::new(used, Some(300), Some(42))
+    fn window(key: &str, used: f64) -> QuotaWindow {
+        QuotaWindow::new(key, "Неделя", used, Some(WEEKLY_MINS), Some(42))
     }
 
     fn good(id: &str) -> AccountState {
@@ -150,8 +182,7 @@ mod tests {
             plan: Some("plus".to_owned()),
             email: Some("user@example.com".to_owned()),
             model: None,
-            five_hour: Some(window(25.0)),
-            weekly: Some(window(54.0)),
+            windows: vec![window("primary", 54.0)],
             balances: Vec::new(),
             error: None,
             updated_at: 1_000,
@@ -168,17 +199,27 @@ mod tests {
 
     #[test]
     fn clamps_percentage_into_range() {
-        assert_eq!(QuotaWindow::new(-5.0, None, None).used_percent, 0.0);
-        assert_eq!(QuotaWindow::new(-5.0, None, None).remaining_percent, 100.0);
-        assert_eq!(QuotaWindow::new(150.0, None, None).used_percent, 100.0);
-        assert_eq!(QuotaWindow::new(150.0, None, None).remaining_percent, 0.0);
+        assert_eq!(window("k", -5.0).used_percent, 0.0);
+        assert_eq!(window("k", -5.0).remaining_percent, 100.0);
+        assert_eq!(window("k", 150.0).used_percent, 100.0);
+        assert_eq!(window("k", 150.0).remaining_percent, 0.0);
     }
 
     #[test]
     fn treats_nan_as_zero_used() {
-        let window = QuotaWindow::new(f64::NAN, None, None);
+        let window = window("k", f64::NAN);
         assert_eq!(window.used_percent, 0.0);
         assert_eq!(window.remaining_percent, 100.0);
+    }
+
+    #[test]
+    fn labels_common_durations() {
+        assert_eq!(label_for_duration(Some(FIVE_HOUR_MINS)), "5 часов");
+        assert_eq!(label_for_duration(Some(WEEKLY_MINS)), "Неделя");
+        assert_eq!(label_for_duration(Some(60)), "1 ч");
+        assert_eq!(label_for_duration(Some(2880)), "2 д");
+        assert_eq!(label_for_duration(Some(45)), "45 мин");
+        assert_eq!(label_for_duration(None), "Лимит");
     }
 
     #[test]
@@ -188,7 +229,7 @@ mod tests {
 
         assert_eq!(merged[0].status, "stale");
         assert_eq!(merged[0].error.as_deref(), Some("сеть"));
-        assert_eq!(merged[0].weekly.as_ref().unwrap().used_percent, 54.0);
+        assert_eq!(merged[0].windows[0].used_percent, 54.0);
         assert_eq!(merged[0].plan.as_deref(), Some("plus"));
         // Возраст берётся от удачного ответа, иначе UI покажет свежесть, которой нет.
         assert_eq!(merged[0].updated_at, 1_000);
@@ -197,10 +238,24 @@ mod tests {
     #[test]
     fn successful_refresh_overwrites_old_data() {
         let mut fresh = good("codex-main");
-        fresh.weekly = Some(window(70.0));
+        fresh.windows = vec![window("primary", 70.0)];
         let merged = merge_with_previous(previous(vec![good("codex-main")]), vec![fresh]);
         assert_eq!(merged[0].status, "ok");
-        assert_eq!(merged[0].weekly.as_ref().unwrap().used_percent, 70.0);
+        assert_eq!(merged[0].windows[0].used_percent, 70.0);
+    }
+
+    #[test]
+    fn a_disappearing_limit_is_not_resurrected_from_history() {
+        // Провайдер может убрать временный лимит. Успешный ответ без него —
+        // это не сбой, и подмешивать старое окно нельзя.
+        let mut fresh = good("codex-main");
+        fresh.windows = vec![window("primary", 10.0)];
+        let mut old = good("codex-main");
+        old.windows = vec![window("primary", 5.0), window("seven_day_fable", 80.0)];
+
+        let merged = merge_with_previous(previous(vec![old]), vec![fresh]);
+        assert_eq!(merged[0].windows.len(), 1);
+        assert_eq!(merged[0].windows[0].key, "primary");
     }
 
     #[test]
@@ -208,7 +263,7 @@ mod tests {
         let fresh = vec![AccountState::error("codex-new", "Codex", "codex", "сеть")];
         let merged = merge_with_previous(previous(vec![good("codex-main")]), fresh);
         assert_eq!(merged[0].status, "error");
-        assert!(merged[0].weekly.is_none());
+        assert!(merged[0].windows.is_empty());
     }
 
     #[test]
@@ -242,6 +297,6 @@ mod tests {
 
         let merged = merge_with_previous(previous(vec![old]), vec![fresh]);
         assert_eq!(merged[0].status, "waiting");
-        assert!(merged[0].weekly.is_none());
+        assert!(merged[0].windows.is_empty());
     }
 }

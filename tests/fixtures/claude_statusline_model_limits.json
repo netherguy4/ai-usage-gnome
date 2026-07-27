@@ -1,0 +1,32 @@
+{
+  "model": {
+    "display_name": "Fable 5"
+  },
+  "version": "2.1.220",
+  "rate_limits": {
+    "seven_day_sonnet": {
+      "used_percentage": 21.0,
+      "resets_at": 1800500000
+    },
+    "five_hour": {
+      "used_percentage": 8.0,
+      "resets_at": 1800000000
+    },
+    "seven_day_fable": {
+      "used_percentage": 88.0,
+      "resets_at": 1800500000
+    },
+    "seven_day": {
+      "used_percentage": 65.0,
+      "resets_at": 1800500000
+    },
+    "seven_day_overage_included": {
+      "used_percentage": 40.0,
+      "resets_at": 1800500000
+    },
+    "seven_day_opus": {
+      "used_percentage": 73.0,
+      "resets_at": 1800500000
+    }
+  }
+}

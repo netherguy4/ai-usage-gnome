@@ -2,7 +2,7 @@
 
 Нативный индикатор в верхней панели GNOME для нескольких аккаунтов:
 
-- **Claude Code** — тариф, остаток 5-часового и недельного лимитов;
+- **Claude Code** — тариф, почта и все лимиты, которые вернул провайдер: 5-часовой, недельный и отдельные лимиты моделей;
 - **Codex** — тариф/email, остаток короткого и недельного лимитов;
 - **DeepSeek API** — доступный баланс;
 - любое количество профилей через отдельные `CLAUDE_CONFIG_DIR` и `CODEX_HOME`.
@@ -67,7 +67,7 @@ ai-usage setup
 ```bash
 ai-usage account list
 ai-usage account add codex  --id codex-work --name "Codex Work" --codex-home ~/.codex-work
-ai-usage account add claude --id claude-main --config-dir ~/.claude --plan Max
+ai-usage account add claude --id claude-main --config-dir ~/.claude
 printf '%s' "$DEEPSEEK_KEY" | ai-usage account add deepseek --id ds --api-key-stdin
 ai-usage account rename codex-work "Codex рабочий"
 ai-usage account remove codex-work
@@ -105,7 +105,11 @@ journalctl --user -u ai-usage.service -f
 CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude
 ```
 
-Мастер добавляет в `settings.json` официальный Claude Code `statusLine` command. Он получает `rate_limits.five_hour` и `rate_limits.seven_day`, записывает их в локальный кеш и одновременно показывает краткую строку в Claude Code.
+Мастер добавляет в `settings.json` официальный Claude Code `statusLine` command. Он забирает **все** ключи из `rate_limits`, записывает их в локальный кеш и одновременно показывает краткую строку в Claude Code.
+
+Список лимитов намеренно не зашит в код. Помимо `five_hour` и `seven_day` Claude Code присылает `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included` и отдельные лимиты моделей. Такие лимиты бывают временными: если Anthropic его уберёт, строка просто исчезнет из меню, а если добавит новый — он появится сам, без обновления приложения.
+
+Тариф и почта читаются из `.claude.json`, который пишет сам Claude Code. Указывать `--plan` вручную нужно, только если хочется переопределить определённое значение.
 
 Перед изменением существующего `settings.json` создаётся резервная копия `settings.json.ai-usage.bak`. Удаление проекта восстанавливает её.
 
@@ -133,7 +137,7 @@ account/read
 account/rateLimits/read
 ```
 
-Из ответа выбирается bucket `codex` (настраивается полем `limit_id`) и окна, ближайшие к 5 часам и 7 дням.
+Из ответа выбирается bucket `codex` (настраивается полем `limit_id`), а его окна получают подпись по длительности.
 
 **Что показывается на разных планах.** Codex возвращает столько окон, сколько есть у тарифа. На `plus`, например, приходит только недельное окно — тогда строки «5 часов» в меню не будет. Это ответ провайдера, а не потеря данных.
 

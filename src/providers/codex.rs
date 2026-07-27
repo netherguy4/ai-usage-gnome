@@ -331,8 +331,7 @@ pub fn parse_account_state(
             plan: None,
             email: None,
             model: None,
-            five_hour: None,
-            weekly: None,
+            windows: Vec::new(),
             balances: Vec::new(),
             error: Some(format!(
                 "Выполни: CODEX_HOME={} {} login",
@@ -365,7 +364,7 @@ pub fn parse_account_state(
     let mut windows = Vec::new();
     for key in ["primary", "secondary"] {
         if let Some(window) = bucket.get(key).filter(|value| !value.is_null()) {
-            if let Some(parsed) = parse_window(window) {
+            if let Some(parsed) = parse_window(key, window) {
                 windows.push(parsed);
             }
         }
@@ -375,7 +374,8 @@ pub fn parse_account_state(
         bail!("Codex вернул пустой набор quota windows");
     }
 
-    let (five_hour, weekly) = select_windows(&windows);
+    // Codex не называет окна, а сообщает длительность: короткое выше длинного.
+    windows.sort_by_key(|window| window.duration_mins.unwrap_or(u64::MAX));
 
     let bucket_plan = bucket
         .get("planType")
@@ -390,8 +390,7 @@ pub fn parse_account_state(
         plan: account_plan.or(bucket_plan),
         email,
         model: None,
-        five_hour,
-        weekly,
+        windows,
         balances: Vec::new(),
         error: None,
         updated_at: crate::util::unix_now(),
@@ -415,51 +414,19 @@ fn reject_rpc_error(message: &Value) -> Result<()> {
     Ok(())
 }
 
-fn parse_window(value: &Value) -> Option<QuotaWindow> {
+fn parse_window(key: &str, value: &Value) -> Option<QuotaWindow> {
     let used = value.get("usedPercent")?.as_f64()?;
     let duration = value.get("windowDurationMins").and_then(Value::as_u64);
     let resets_at = value.get("resetsAt").and_then(Value::as_i64);
-    Some(QuotaWindow::new(used, duration, resets_at))
-}
-
-fn select_windows(windows: &[QuotaWindow]) -> (Option<QuotaWindow>, Option<QuotaWindow>) {
-    if windows.is_empty() {
-        return (None, None);
-    }
-
-    if windows.len() == 1 {
-        let window = windows[0].clone();
-        let duration = window.duration_mins.unwrap_or(300);
-        if duration.abs_diff(300) <= duration.abs_diff(10_080) {
-            return (Some(window), None);
-        }
-        return (None, Some(window));
-    }
-
-    let five_index = closest_index(windows, 300, None).unwrap_or(0);
-    let weekly_index = closest_index(windows, 10_080, Some(five_index));
-    (
-        Some(windows[five_index].clone()),
-        weekly_index.map(|index| windows[index].clone()),
-    )
-}
-
-fn closest_index(
-    windows: &[QuotaWindow],
-    target_mins: u64,
-    excluded_index: Option<usize>,
-) -> Option<usize> {
-    windows
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| Some(*index) != excluded_index)
-        .min_by_key(|(_, window)| {
-            window
-                .duration_mins
-                .map(|value| value.abs_diff(target_mins))
-                .unwrap_or(u64::MAX)
-        })
-        .map(|(index, _)| index)
+    // Codex именует окна позиционно (primary/secondary), поэтому подпись
+    // берём из длительности — она осмысленна для пользователя.
+    Some(QuotaWindow::new(
+        key,
+        crate::model::label_for_duration(duration),
+        used,
+        duration,
+        resets_at,
+    ))
 }
 
 #[cfg(test)]
@@ -502,19 +469,26 @@ mod tests {
         assert_eq!(state.email.as_deref(), Some("user@example.com"));
         assert!(state.error.is_none());
 
-        assert!(state.five_hour.is_none());
-        let weekly = state.weekly.expect("недельное окно должно быть");
+        assert_eq!(state.windows.len(), 1, "у plus только недельное окно");
+        let weekly = &state.windows[0];
         assert_eq!(weekly.used_percent, 54.0);
         assert_eq!(weekly.remaining_percent, 46.0);
         assert_eq!(weekly.duration_mins, Some(10_080));
         assert_eq!(weekly.resets_at, Some(1_785_631_187));
+        assert_eq!(weekly.label, "Неделя");
     }
 
     #[test]
     fn parses_both_windows_when_the_plan_has_two() {
         let state = state(ACCOUNT_OK, LIMITS_TWO).unwrap();
-        assert_eq!(state.five_hour.unwrap().duration_mins, Some(300));
-        assert_eq!(state.weekly.unwrap().duration_mins, Some(10_080));
+        assert_eq!(
+            state
+                .windows
+                .iter()
+                .map(|w| w.duration_mins)
+                .collect::<Vec<_>>(),
+            [Some(300), Some(10_080)]
+        );
     }
 
     #[test]
@@ -572,7 +546,7 @@ mod tests {
         // Старые сборки app-server отдавали только result.rateLimits.
         let limits = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":7}}}}"#;
         let state = state(ACCOUNT_OK, limits).unwrap();
-        assert_eq!(state.five_hour.unwrap().remaining_percent, 90.0);
+        assert_eq!(state.windows[0].remaining_percent, 90.0);
     }
 
     #[test]
@@ -585,8 +559,8 @@ mod tests {
     fn window_missing_used_percent_is_skipped() {
         let limits = r#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{"primary":{"windowDurationMins":300},"secondary":{"usedPercent":20,"windowDurationMins":10080}}}}}"#;
         let state = state(ACCOUNT_OK, limits).unwrap();
-        assert!(state.five_hour.is_none());
-        assert_eq!(state.weekly.unwrap().used_percent, 20.0);
+        assert_eq!(state.windows.len(), 1, "окно без usedPercent пропускается");
+        assert_eq!(state.windows[0].used_percent, 20.0);
     }
 
     /// Прогоняет строки через ту же `absorb`, которую использует чтение stdout.
@@ -646,30 +620,35 @@ mod tests {
     }
 
     #[test]
-    fn maps_five_hour_and_weekly_windows() {
-        let windows = vec![
-            QuotaWindow::new(25.0, Some(300), Some(1)),
-            QuotaWindow::new(50.0, Some(10_080), Some(2)),
-        ];
-        let (five, weekly) = select_windows(&windows);
-        assert_eq!(five.unwrap().duration_mins, Some(300));
-        assert_eq!(weekly.unwrap().duration_mins, Some(10_080));
+    fn labels_windows_by_their_duration() {
+        let state = state(ACCOUNT_OK, LIMITS_TWO).unwrap();
+        let labels: Vec<_> = state.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, ["5 часов", "Неделя"]);
     }
 
     #[test]
-    fn maps_single_weekly_window_as_weekly() {
-        let windows = vec![QuotaWindow::new(50.0, Some(10_080), Some(2))];
-        let (five, weekly) = select_windows(&windows);
-        assert!(five.is_none());
-        assert!(weekly.is_some());
+    fn shorter_windows_come_first_regardless_of_response_order() {
+        // Недельное окно приходит в primary, пятичасовое — в secondary.
+        let limits = r#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{
+            "primary":{"usedPercent":50,"windowDurationMins":10080},
+            "secondary":{"usedPercent":10,"windowDurationMins":300}}}}}"#;
+        let state = state(ACCOUNT_OK, limits).unwrap();
+        assert_eq!(
+            state
+                .windows
+                .iter()
+                .map(|w| w.duration_mins)
+                .collect::<Vec<_>>(),
+            [Some(300), Some(10_080)]
+        );
     }
 
     #[test]
-    fn maps_single_short_window_as_five_hour() {
-        let windows = vec![QuotaWindow::new(50.0, Some(300), Some(2))];
-        let (five, weekly) = select_windows(&windows);
-        assert!(five.is_some());
-        assert!(weekly.is_none());
+    fn an_unusual_window_duration_still_gets_a_label() {
+        let limits = r#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{
+            "primary":{"usedPercent":50,"windowDurationMins":1440}}}}}"#;
+        let state = state(ACCOUNT_OK, limits).unwrap();
+        assert_eq!(state.windows[0].label, "1 д");
     }
 
     #[test]

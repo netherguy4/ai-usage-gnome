@@ -17,17 +17,18 @@
 
 - Rust CLI с командами `daemon`, `once`, `setup`, `init`, `doctor`.
 - Параллельный сбор нескольких аккаунтов с сохранением порядка.
-- Общая сериализуемая модель `AppState` schema v1.
+- Общая сериализуемая модель `AppState` schema v2 с открытым списком лимитов.
 - Атомарная запись `state.json`.
 - Ошибка одного provider преобразуется в отдельный error state.
-- Минимальный unit coverage выбора 5h/weekly Codex windows.
+- 100 unit-тестов на фикстурах реальных ответов провайдеров.
 
 ### Claude
 
 - Multi-profile config через отдельные `CLAUDE_CONFIG_DIR`.
 - Установка status-line hook.
 - Backup исходного `settings.json`.
-- Локальный cache лимитов и модели.
+- Локальный cache лимитов и модели, включая лимиты отдельных моделей.
+- Почта и тариф из `.claude.json`.
 - Состояния waiting/ok/stale.
 - Восстановление прежнего `statusLine` при удалении с защитой от перезаписи более нового пользовательского изменения.
 
@@ -51,7 +52,7 @@
 
 - Panel indicator и popup menu.
 - Отображение нескольких аккаунтов.
-- 5h/weekly remaining и reset countdown.
+- Все лимиты, которые вернул провайдер, с remaining и reset countdown.
 - DeepSeek money formatting.
 - Error/waiting/stale/unauthenticated/depleted labels.
 - File monitor плюс периодическая перечитка.
@@ -84,7 +85,7 @@
 
 Полные условия, команды и результаты — в [`TESTING.md`](TESTING.md). Кратко, на Bluefin 44.20260721 / GNOME Shell 50.3 / Rust 1.97.1 / codex-cli 0.145.0 / claude 2.1.220:
 
-- `cargo fmt --check`, `clippy -D warnings`, `cargo test` (85 тестов), release build — все зелёные.
+- `cargo fmt --check`, `clippy -D warnings`, `cargo test` (100 тестов), release build — все зелёные.
 - Живой Codex handshake и схема ответа; план `plus` отдаёт одно недельное окно.
 - Два независимых `CODEX_HOME` в одном конфиге.
 - Ошибки Codex: нет команды, не авторизован, несуществующий `CODEX_HOME`.
@@ -97,8 +98,7 @@
 
 ## Что обязательно требует тестирования
 
-- **Рендеринг расширения в GNOME Shell.** На Wayland требуется перезаход в сессию, чтобы Shell увидел новое расширение; до этого `gnome-extensions enable` не работает. Не проверены: popup при разных наборах аккаунтов, file monitor, кнопка обновления, многократные enable/disable, длинные строки.
-- systemd user-service после настоящего reboot/login.
+- Popup расширения при разных наборах аккаунтов, file monitor, кнопка обновления, многократные enable/disable, длинные строки. Само расширение после перезахода в сессию включается и держится в состоянии ACTIVE без ошибок в журнале.
 - Реальный DeepSeek key: currency entries, depleted, 401/403.
 - Release workflow, aarch64 cross-build и установка release archive.
 - Online installer на настоящем GitHub Release.
@@ -119,7 +119,6 @@
 - Production-ready статус: код и локальная приёмка готовы, но расширение ни разу не отрисовывалось в GNOME Shell и релиз не публиковался.
 - Опубликованный и проверенный GitHub Release.
 - Подтверждённая установка одной командой из release.
-- Полная автоматическая детекция Claude plan.
 - GUI Preferences для GNOME extension.
 - Безопасное хранение DeepSeek key в Secret Service/keyring.
 - Локализация UI.
@@ -128,7 +127,7 @@
 ## Известные риски и ограничения
 
 - Claude quota cache зависит от фактического запуска Claude Code и ответа модели.
-- Claude plan ручной и может быть неверным.
+- Тариф и почта Claude берутся из `.claude.json`; формат этого файла не документирован и может измениться.
 - Неправильный/изменившийся Codex JSON-RPC schema даст error state всем Codex profiles.
 - На плане Codex `plus` возвращается только недельное окно — строки «5 часов» в UI не будет. Это поведение провайдера, а не дефект.
 - Все Codex app-server процессы запускаются параллельно на каждом refresh; при большом числе аккаунтов это может быть тяжело.

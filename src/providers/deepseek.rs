@@ -97,8 +97,7 @@ pub async fn fetch_with_key(
         plan: Some("API".to_owned()),
         email: None,
         model: None,
-        five_hour: None,
-        weekly: None,
+        windows: Vec::new(),
         balances: payload
             .balance_infos
             .into_iter()

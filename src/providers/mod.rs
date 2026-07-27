@@ -11,9 +11,12 @@ pub async fn fetch(account: AccountConfig, stale_seconds: i64) -> AccountState {
     let provider = account.provider();
 
     let result = match account {
-        AccountConfig::Claude { id, name, plan, .. } => {
-            claude::fetch(&id, &name, plan, stale_seconds).await
-        }
+        AccountConfig::Claude {
+            id,
+            name,
+            plan,
+            config_dir,
+        } => claude::fetch(&id, &name, plan, &config_dir, stale_seconds).await,
         AccountConfig::Codex {
             id,
             name,

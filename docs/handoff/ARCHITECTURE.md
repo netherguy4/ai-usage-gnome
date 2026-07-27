@@ -44,11 +44,13 @@ updated_at
 accounts[]
 ```
 
-`AccountState` содержит общие поля `id`, `name`, `provider`, `status`, `plan`, `email`, `model`, два quota window, balances, error и `updated_at`.
+`AccountState` содержит общие поля `id`, `name`, `provider`, `status`, `plan`, `email`, `model`, открытый список `windows`, balances, error и `updated_at`.
+
+Каждое окно — `{key, label, used_percent, remaining_percent, duration_mins, resets_at}`. Список открыт намеренно: провайдеры заводят и убирают лимиты (недельный лимит на конкретную модель у Claude), и фиксированная пара полей `five_hour`/`weekly` заставляла бы править код на каждое такое изменение, а незнакомые лимиты молча терялись бы.
 
 `QuotaWindow::new()` ограничивает `used_percent` диапазоном 0–100 и вычисляет `remaining_percent`.
 
-Текущий `schema_version`: `1`.
+Текущий `schema_version`: `2`.
 
 ### Конфигурация
 
@@ -59,7 +61,7 @@ $XDG_CONFIG_HOME/ai-usage/config.toml
 обычно ~/.config/ai-usage/config.toml
 ```
 
-Провайдеры хранятся как tagged TOML enum. Повторный ID в setup заменяет существующую запись. Удаления аккаунтов через CLI пока нет.
+Провайдеры хранятся как tagged TOML enum. Повторный ID заменяет существующую запись. Управление аккаунтами — через `ai-usage account`.
 
 ### Claude provider
 
@@ -70,7 +72,7 @@ $XDG_CONFIG_HOME/ai-usage/config.toml
 1. setup создаёт backup `settings.json.ai-usage.bak`, если settings уже существует и backup ещё не создан;
 2. поле `statusLine` заменяется командой текущего `ai-usage` binary;
 3. Claude Code передаёт JSON в stdin hook;
-4. hook извлекает `model.display_name`, `rate_limits.five_hour`, `rate_limits.seven_day`;
+4. hook извлекает `model.display_name` и **все** ключи из `rate_limits` — помимо документированных `five_hour`/`seven_day` там встречаются `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included` и лимиты отдельных моделей;
 5. cache пишется в `$XDG_DATA_HOME/ai-usage/claude/<account-id>.json`;
 6. daemon читает cache, а не запускает Claude.
 
@@ -78,7 +80,7 @@ $XDG_CONFIG_HOME/ai-usage/config.toml
 
 Ограничения архитектуры:
 
-- тариф Claude не определяется автоматически и задаётся в config;
+- тариф и почта Claude читаются из `.claude.json`, который пишет сам Claude Code; заданный вручную `plan` в конфиге имеет приоритет;
 - данные обновляются только после ответа Claude Code;
 - stale threshold настраивается через `stale_seconds`, по умолчанию 24 часа;
 - два account ID с одним `CLAUDE_CONFIG_DIR` отклоняются валидацией конфига.
@@ -94,7 +96,7 @@ $XDG_CONFIG_HOME/ai-usage/config.toml
 3. stdout читается до ответов ID `1` и `2`, максимум 20 секунд;
 4. account даёт email и `planType`;
 5. rate-limit bucket выбирается по `limit_id`, по умолчанию `codex`;
-6. `primary` и `secondary` сопоставляются с окнами, ближайшими к 300 и 10 080 минутам;
+6. `primary` и `secondary` становятся окнами с подписью по длительности;
 7. subprocess завершается.
 
 Батч из четырёх сообщений отправляется без ожидания ответа на `initialize`. Это подтверждено живым тестом на app-server 0.145.0: сервер отвечает на `initialize` первым, а рабочие запросы принимает из того же батча. Ответ `id 0` всё равно разбирается — чтобы отличить отказ handshake от молчания сервера.
@@ -122,7 +124,7 @@ Extension:
 - использует `Gio.FileMonitor` и резервный timer раз в 60 секунд;
 - показывает аккаунты, лимиты, reset countdown, balance, возраст данных и ошибки;
 - отличает `stale` (данные есть, но устарели) от `error` (данных нет вовсе);
-- panel label показывает минимальный remaining percentage по неустаревшим аккаунтам;
+- panel label показывает значок каждого провайдера и его худший остаток: общий минимум не позволял понять, чей лимит заканчивается;
 - «Обновить сейчас» перезапускает `ai-usage.service`.
 
 В metadata заявлены GNOME Shell 48–50. Реально прогонялась только 50.3.
@@ -148,7 +150,8 @@ $XDG_RUNTIME_DIR/ai-usage/state.json
 - Rust process не копирует OAuth tokens в собственный config.
 - DeepSeek key находится в plaintext user-only env-файле, не в keyring.
 - `state.json` не должен содержать токены или полные API responses.
-- Codex stderr сейчас отбрасывается, что снижает риск случайной утечки, но сильно ухудшает диагностику. Безопасное логирование нужно проектировать с redaction.
+- Codex stderr попадает в ошибку только хвостом в 4 КБ и после redaction; сама redaction эвристическая и гарантией не является.
+- Из `.claude.json` читаются только почта и тип организации; токены оттуда не берутся.
 
 ## Точки расширения
 

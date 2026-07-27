@@ -114,9 +114,7 @@ export default class AiUsageExtension extends Extension {
             return;
         }
 
-        let minimumRemaining = null;
-        let hasError = false;
-        let anyStale = false;
+        const summary = [];
 
         accounts.forEach((account, index) => {
             if (index > 0)
@@ -125,19 +123,14 @@ export default class AiUsageExtension extends Extension {
             const subtitle = [account.plan, account.email].filter(Boolean).join(' · ');
             this._addItem(`${providerIcon(account.provider)} ${account.name}${subtitle ? ` — ${subtitle}` : ''}`, true);
 
-            const hasQuota = Boolean(account.five_hour || account.weekly);
+            const windows = Array.isArray(account.windows) ? account.windows : [];
             const hasBalances = Array.isArray(account.balances) && account.balances.length > 0;
             const stale = account.status === 'stale';
+            let worst = null;
 
-            if (account.five_hour) {
-                this._addItem(formatWindow('5 часов', account.five_hour));
-                if (!stale)
-                    minimumRemaining = minValue(minimumRemaining, effectiveRemaining(account.five_hour));
-            }
-            if (account.weekly) {
-                this._addItem(formatWindow('Неделя', account.weekly));
-                if (!stale)
-                    minimumRemaining = minValue(minimumRemaining, effectiveRemaining(account.weekly));
+            for (const window of windows) {
+                this._addItem(formatWindow(window));
+                worst = minValue(worst, effectiveRemaining(window));
             }
             if (hasBalances) {
                 for (const balance of account.balances)
@@ -146,13 +139,13 @@ export default class AiUsageExtension extends Extension {
 
             // Возраст показываем всегда, когда данные есть: без него нельзя
             // отличить свежий ноль от давно не обновлявшегося.
-            if (hasQuota || hasBalances) {
+            if (windows.length || hasBalances) {
                 const age = formatAge(account.updated_at);
                 if (age)
                     this._addItem(`Обновлено: ${age}`, false, stale ? 'ai-usage-stale' : null);
             }
 
-            if (!hasQuota && !hasBalances) {
+            if (!windows.length && !hasBalances) {
                 // Данных нет вовсе — показываем причину вместо пустоты.
                 this._addItem(account.error || statusText(account.status), false, 'ai-usage-error');
             } else if (account.error) {
@@ -160,13 +153,15 @@ export default class AiUsageExtension extends Extension {
                 this._addItem(`⚠ ${account.error}`, false, stale ? 'ai-usage-stale' : 'ai-usage-error');
             }
 
-            if (stale)
-                anyStale = true;
-            if (account.status === 'error' || account.status === 'unauthenticated')
-                hasError = true;
+            summary.push({
+                icon: providerIcon(account.provider),
+                remaining: worst,
+                stale,
+                broken: account.status === 'error' || account.status === 'unauthenticated',
+            });
         });
 
-        this._label.text = panelLabel(minimumRemaining, hasError, anyStale);
+        this._label.text = panelLabel(summary);
         this._addRefreshItem();
     }
 
@@ -218,10 +213,11 @@ function effectiveRemaining(window) {
     return Math.max(0, Math.min(100, Number(window.remaining_percent) || 0));
 }
 
-function formatWindow(title, window) {
+function formatWindow(window) {
     const remaining = effectiveRemaining(window);
     const reset = formatReset(window.resets_at);
-    return `${title}: ${Math.round(remaining)}% осталось${reset ? ` · ${reset}` : ''}`;
+    const label = window.label || window.key || 'Лимит';
+    return `${label}: ${Math.round(remaining)}% осталось${reset ? ` · ${reset}` : ''}`;
 }
 
 function formatReset(timestamp) {
@@ -267,16 +263,21 @@ function statusText(status) {
     }
 }
 
-// Метка панели. Устаревшие данные помечаются '!', чтобы процент не выглядел
-// свежим; провайдер без данных вовсе — тоже восклицательным знаком.
-function panelLabel(minimumRemaining, hasError, anyStale) {
-    if (minimumRemaining !== null) {
-        const percent = `AI ${Math.round(minimumRemaining)}%`;
-        return hasError || anyStale ? `${percent} !` : percent;
-    }
-    if (anyStale)
-        return 'AI ~';
-    return hasError ? 'AI !' : 'AI';
+// Метка панели: значок провайдера и его худший остаток, по одному на аккаунт.
+// Общий минимум по всем аккаунтам был неоднозначен — по числу нельзя было
+// понять, чей лимит заканчивается.
+//
+// '~' помечает устаревшие данные, '!' — аккаунт без данных вовсе.
+function panelLabel(summary) {
+    if (!summary.length)
+        return 'AI';
+
+    const parts = summary.map(entry => {
+        if (entry.remaining === null)
+            return `${entry.icon} !`;
+        return `${entry.icon} ${Math.round(entry.remaining)}%${entry.stale ? '~' : ''}`;
+    });
+    return parts.join(' ');
 }
 
 function formatAge(updatedAt) {
