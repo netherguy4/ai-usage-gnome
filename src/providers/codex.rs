@@ -162,21 +162,29 @@ async fn read_responses(stdout: tokio::process::ChildStdout) -> Result<Responses
     };
 
     while let Some(line) = lines.next_line().await? {
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        match message.get("id").and_then(Value::as_i64) {
-            Some(0) => responses.handshake = Some(message),
-            Some(1) => responses.account = Some(message),
-            Some(2) => responses.limits = Some(message),
-            _ => {}
-        }
-        if responses.account.is_some() && responses.limits.is_some() {
+        if responses.absorb(&line) {
             break;
         }
     }
 
     Ok(responses)
+}
+
+impl Responses {
+    /// Разбирает одну строку JSONL и сообщает, собраны ли оба нужных ответа.
+    /// Нераспознанные строки и уведомления игнорируются: app-server шлёт их
+    /// вперемешку с ответами.
+    fn absorb(&mut self, line: &str) -> bool {
+        if let Ok(message) = serde_json::from_str::<Value>(line) {
+            match message.get("id").and_then(Value::as_i64) {
+                Some(0) => self.handshake = Some(message),
+                Some(1) => self.account = Some(message),
+                Some(2) => self.limits = Some(message),
+                _ => {}
+            }
+        }
+        self.account.is_some() && self.limits.is_some()
+    }
 }
 
 /// Читает stderr дочернего процесса, удерживая в памяти только хвост.
@@ -254,7 +262,9 @@ fn redact(text: &str) -> String {
     };
 
     for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+' | '/' | '=') {
+        // '=' намеренно не входит в состав токена: иначе 'key=sk-...' стало бы
+        // одним токеном и не попало бы ни под одно правило.
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+' | '/') {
             token.push(ch);
         } else {
             flush(&mut token, &mut previous, &mut out);
@@ -445,6 +455,185 @@ fn closest_index(
 mod tests {
     use super::*;
 
+    const ACCOUNT_OK: &str = include_str!("../../tests/fixtures/codex_account_authenticated.json");
+    const ACCOUNT_ANON: &str =
+        include_str!("../../tests/fixtures/codex_account_unauthenticated.json");
+    const LIMITS_PLUS: &str = include_str!("../../tests/fixtures/codex_rate_limits_plus.json");
+    const LIMITS_ERROR: &str =
+        include_str!("../../tests/fixtures/codex_rate_limits_unauthenticated_error.json");
+    const LIMITS_TWO: &str =
+        include_str!("../../tests/fixtures/codex_rate_limits_two_windows.json");
+
+    fn json(raw: &str) -> Value {
+        serde_json::from_str(raw).expect("фикстура должна разбираться")
+    }
+
+    fn state(account: &str, limits: &str) -> Result<AccountState> {
+        parse_account_state(
+            "codex-main",
+            "Codex",
+            "codex",
+            Path::new("/home/user/.codex"),
+            "codex",
+            &json(account),
+            &json(limits),
+        )
+    }
+
+    #[test]
+    fn parses_live_plus_account_with_a_single_weekly_window() {
+        // На плане plus сервер возвращает только primary (10080 минут),
+        // secondary равен null — окна на 5 часов у аккаунта нет вовсе.
+        let state = state(ACCOUNT_OK, LIMITS_PLUS).unwrap();
+
+        assert_eq!(state.status, "ok");
+        assert_eq!(state.plan.as_deref(), Some("plus"));
+        assert_eq!(state.email.as_deref(), Some("user@example.com"));
+        assert!(state.error.is_none());
+
+        assert!(state.five_hour.is_none());
+        let weekly = state.weekly.expect("недельное окно должно быть");
+        assert_eq!(weekly.used_percent, 54.0);
+        assert_eq!(weekly.remaining_percent, 46.0);
+        assert_eq!(weekly.duration_mins, Some(10_080));
+        assert_eq!(weekly.resets_at, Some(1_785_631_187));
+    }
+
+    #[test]
+    fn parses_both_windows_when_the_plan_has_two() {
+        let state = state(ACCOUNT_OK, LIMITS_TWO).unwrap();
+        assert_eq!(state.five_hour.unwrap().duration_mins, Some(300));
+        assert_eq!(state.weekly.unwrap().duration_mins, Some(10_080));
+    }
+
+    #[test]
+    fn unauthenticated_account_reports_the_login_command() {
+        // Ошибка лимитов при этом игнорируется: до логина она ожидаема.
+        let state = state(ACCOUNT_ANON, LIMITS_ERROR).unwrap();
+        assert_eq!(state.status, "unauthenticated");
+        let error = state.error.expect("должна быть подсказка");
+        assert!(error.contains("/home/user/.codex"), "{error}");
+        assert!(error.contains("login"), "{error}");
+    }
+
+    #[test]
+    fn rpc_error_on_account_read_becomes_an_error() {
+        let message = json(r#"{"id":1,"error":{"code":-32600,"message":"boom"}}"#);
+        let error = parse_account_state(
+            "codex-main",
+            "Codex",
+            "codex",
+            Path::new("/home/user/.codex"),
+            "codex",
+            &message,
+            &json(LIMITS_PLUS),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("boom"), "{error}");
+    }
+
+    #[test]
+    fn authenticated_account_surfaces_a_rate_limit_error() {
+        let error = state(ACCOUNT_OK, LIMITS_ERROR).unwrap_err().to_string();
+        assert!(error.contains("authentication required"), "{error}");
+    }
+
+    #[test]
+    fn unknown_bucket_id_is_reported() {
+        let error = parse_account_state(
+            "codex-main",
+            "Codex",
+            "codex",
+            Path::new("/home/user/.codex"),
+            "no-such-bucket",
+            &json(ACCOUNT_OK),
+            // Без общего rateLimits fallback bucket действительно не найти.
+            &json(r#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{"primary":null}}}}"#),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("bucket"), "{error}");
+    }
+
+    #[test]
+    fn falls_back_to_the_flat_rate_limits_object() {
+        // Старые сборки app-server отдавали только result.rateLimits.
+        let limits = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300,"resetsAt":7}}}}"#;
+        let state = state(ACCOUNT_OK, limits).unwrap();
+        assert_eq!(state.five_hour.unwrap().remaining_percent, 90.0);
+    }
+
+    #[test]
+    fn empty_window_set_is_an_error_not_a_silent_zero() {
+        let limits = r#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{"primary":null,"secondary":null}}}}"#;
+        assert!(state(ACCOUNT_OK, limits).is_err());
+    }
+
+    #[test]
+    fn window_missing_used_percent_is_skipped() {
+        let limits = r#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{"primary":{"windowDurationMins":300},"secondary":{"usedPercent":20,"windowDurationMins":10080}}}}}"#;
+        let state = state(ACCOUNT_OK, limits).unwrap();
+        assert!(state.five_hour.is_none());
+        assert_eq!(state.weekly.unwrap().used_percent, 20.0);
+    }
+
+    /// Прогоняет строки через ту же `absorb`, которую использует чтение stdout.
+    fn absorb_lines(lines: &[&str]) -> Responses {
+        let mut responses = Responses {
+            handshake: None,
+            account: None,
+            limits: None,
+        };
+        for line in lines {
+            if responses.absorb(line) {
+                break;
+            }
+        }
+        responses
+    }
+
+    fn line(raw: &str) -> String {
+        serde_json::to_string(&json(raw)).unwrap()
+    }
+
+    #[test]
+    fn handles_responses_in_reverse_order() {
+        // Живой app-server на неавторизованном профиле присылает ошибку id 2
+        // раньше ответа id 1. Чтение не должно зависеть от порядка.
+        let limits = line(LIMITS_ERROR);
+        let account = line(ACCOUNT_ANON);
+        let responses = absorb_lines(&[&limits, &account]);
+
+        assert!(responses.account.is_some(), "ответ id 1 потерян");
+        assert!(responses.limits.is_some(), "ответ id 2 потерян");
+    }
+
+    #[test]
+    fn ignores_notifications_and_unparsable_lines() {
+        let account = line(ACCOUNT_OK);
+        let limits = line(LIMITS_PLUS);
+        let responses = absorb_lines(&[
+            "not json at all",
+            r#"{"method":"remoteControl/status/changed","params":{}}"#,
+            &account,
+            &limits,
+        ]);
+
+        assert!(responses.account.is_some());
+        assert!(responses.limits.is_some());
+    }
+
+    #[test]
+    fn keeps_the_initialize_response_for_diagnostics() {
+        let handshake = r#"{"id":0,"error":{"code":-1,"message":"unsupported client"}}"#;
+        let responses = absorb_lines(&[handshake]);
+        assert_eq!(
+            responses.handshake.as_ref().and_then(rpc_error_text),
+            Some("unsupported client".to_owned())
+        );
+    }
+
     #[test]
     fn maps_five_hour_and_weekly_windows() {
         let windows = vec![
@@ -462,5 +651,49 @@ mod tests {
         let (five, weekly) = select_windows(&windows);
         assert!(five.is_none());
         assert!(weekly.is_some());
+    }
+
+    #[test]
+    fn maps_single_short_window_as_five_hour() {
+        let windows = vec![QuotaWindow::new(50.0, Some(300), Some(2))];
+        let (five, weekly) = select_windows(&windows);
+        assert!(five.is_some());
+        assert!(weekly.is_none());
+    }
+
+    #[test]
+    fn redacts_bearer_tokens_and_api_keys() {
+        let text = "auth failed: Authorization: Bearer abc123def456ghi789 key=sk-proj-1234567890";
+        let redacted = redact(text);
+        assert!(!redacted.contains("abc123def456ghi789"), "{redacted}");
+        assert!(!redacted.contains("sk-proj-1234567890"), "{redacted}");
+        assert!(redacted.contains("<redacted>"), "{redacted}");
+    }
+
+    #[test]
+    fn redacts_jwt_like_strings() {
+        let redacted = redact("token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload");
+        assert!(!redacted.contains("eyJhbGciOiJIUzI1NiIs"), "{redacted}");
+    }
+
+    #[test]
+    fn redacts_long_opaque_blobs() {
+        let blob = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0";
+        assert_eq!(blob.len(), 40);
+        assert!(redact(blob).contains("<redacted>"));
+    }
+
+    #[test]
+    fn keeps_diagnostics_readable() {
+        // Ради редакции нельзя терять то, что делает сообщение полезным.
+        let text = "Error: CODEX_HOME points to \"/var/home/user/.codex-work\", but that path does not exist";
+        let redacted = redact(text);
+        assert_eq!(redacted, text, "путь и текст ошибки должны сохраниться");
+    }
+
+    #[test]
+    fn keeps_version_numbers_and_paths() {
+        let text = "codex-cli 0.145.0 at /usr/local/lib/node_modules/codex/bin/codex.js";
+        assert_eq!(redact(text), text);
     }
 }

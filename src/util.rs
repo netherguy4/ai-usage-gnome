@@ -136,3 +136,136 @@ pub fn load_secrets_env() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "ai-usage-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn atomic_write_creates_parent_directories() {
+        let dir = temp_dir("atomic-parents");
+        let path = dir.join("nested").join("deeper").join("state.json");
+        atomic_write(&path, b"{}").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temporary_files() {
+        let dir = temp_dir("atomic-temp");
+        let path = dir.join("state.json");
+        atomic_write(&path, b"first").unwrap();
+        atomic_write(&path, b"second").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "остались временные файлы: {leftovers:?}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn secret_file_is_never_world_readable_even_for_an_instant() {
+        // Права выставляются на временном файле до rename, поэтому итоговый
+        // путь сразу появляется с 0600 — отдельного chmod после записи нет.
+        let dir = temp_dir("secret-mode");
+        let path = dir.join("secrets.env");
+        atomic_write_mode(&path, b"KEY=value\n", Some(0o600)).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "получены права {mode:o}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rewriting_a_secret_keeps_restrictive_mode() {
+        let dir = temp_dir("secret-rewrite");
+        let path = dir.join("secrets.env");
+        atomic_write_mode(&path, b"KEY=one\n", Some(0o600)).unwrap();
+        atomic_write_mode(&path, b"KEY=two\n", Some(0o600)).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "KEY=two\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn accepts_safe_ids() {
+        for id in ["claude-main", "codex_work", "a1", "A-B_9"] {
+            validate_id(id).unwrap_or_else(|error| panic!("{id} отклонён: {error}"));
+        }
+    }
+
+    #[test]
+    fn rejects_ids_that_could_escape_a_directory() {
+        // ID подставляется в имя файла кеша, поэтому '/' и '..' недопустимы.
+        for id in ["", "../etc", "a/b", "a b", "café", "a.b"] {
+            assert!(validate_id(id).is_err(), "ID '{id}' должен быть отклонён");
+        }
+    }
+
+    #[test]
+    fn env_name_is_uppercase_and_prefixed() {
+        assert_eq!(
+            env_name_for_id("deepseek-main"),
+            "AI_USAGE_DEEPSEEK_DEEPSEEK_MAIN"
+        );
+        assert_eq!(env_name_for_id("a_b"), "AI_USAGE_DEEPSEEK_A_B");
+    }
+
+    #[test]
+    fn shell_quoting_survives_embedded_quotes() {
+        assert_eq!(
+            shell_single_quote("/usr/bin/ai-usage"),
+            "'/usr/bin/ai-usage'"
+        );
+        assert_eq!(shell_single_quote("it's"), r"'it'\''s'");
+        assert_eq!(
+            shell_single_quote("/home/o'brien/bin/ai usage"),
+            r"'/home/o'\''brien/bin/ai usage'"
+        );
+    }
+
+    #[test]
+    fn expands_only_leading_tilde() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_home(Path::new("~")), home);
+        assert_eq!(expand_home(Path::new("~/.codex")), home.join(".codex"));
+        // '~' в середине пути — обычный символ.
+        assert_eq!(
+            expand_home(Path::new("/tmp/~/x")),
+            PathBuf::from("/tmp/~/x")
+        );
+        assert_eq!(
+            expand_home(Path::new("/absolute/path")),
+            PathBuf::from("/absolute/path")
+        );
+    }
+
+    #[test]
+    fn cache_path_is_scoped_per_account() {
+        let one = claude_cache_file("claude-main").unwrap();
+        let two = claude_cache_file("claude-work").unwrap();
+        assert_ne!(one, two);
+        assert!(one.ends_with("claude/claude-main.json"));
+    }
+}

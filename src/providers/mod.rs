@@ -5,13 +5,15 @@ pub mod deepseek;
 use crate::config::AccountConfig;
 use crate::model::AccountState;
 
-pub async fn fetch(account: AccountConfig) -> AccountState {
+pub async fn fetch(account: AccountConfig, stale_seconds: i64) -> AccountState {
     let id = account.id().to_owned();
     let name = account.name().to_owned();
     let provider = account.provider();
 
     let result = match account {
-        AccountConfig::Claude { id, name, plan, .. } => claude::fetch(&id, &name, plan).await,
+        AccountConfig::Claude { id, name, plan, .. } => {
+            claude::fetch(&id, &name, plan, stale_seconds).await
+        }
         AccountConfig::Codex {
             id,
             name,

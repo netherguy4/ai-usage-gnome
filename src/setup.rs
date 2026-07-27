@@ -163,7 +163,17 @@ fn add_deepseek(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-fn install_claude_status_line(account_id: &str, config_dir: &Path) -> Result<()> {
+/// Установлен ли наш hook в `settings.json` этого профиля.
+pub fn is_hook_installed(account_id: &str, config_dir: &Path) -> bool {
+    let settings_path = crate::util::expand_home(config_dir).join("settings.json");
+    fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .map(|settings| is_our_hook(&settings, account_id))
+        .unwrap_or(false)
+}
+
+pub fn install_claude_status_line(account_id: &str, config_dir: &Path) -> Result<()> {
     let dir = crate::util::expand_home(config_dir);
     fs::create_dir_all(&dir)?;
     let settings_path = dir.join("settings.json");
@@ -191,9 +201,9 @@ fn install_claude_status_line(account_id: &str, config_dir: &Path) -> Result<()>
         .context("Корень Claude settings.json должен быть объектом")?;
     let executable = std::env::current_exe()?;
     let command = format!(
-        "{} claude-hook --account {}",
+        "{} {}",
         crate::util::shell_single_quote(&executable.to_string_lossy()),
-        crate::util::shell_single_quote(account_id)
+        hook_marker(account_id)
     );
     object.insert(
         "statusLine".to_owned(),
@@ -213,82 +223,140 @@ fn install_claude_status_line(account_id: &str, config_dir: &Path) -> Result<()>
 
 pub fn restore_claude_hooks() -> Result<()> {
     let config = config::load()?;
-    for account in config.accounts {
-        let AccountConfig::Claude { id, config_dir, .. } = account else {
-            continue;
-        };
-        let dir = crate::util::expand_home(&config_dir);
-        let settings_path = dir.join("settings.json");
-        let backup_path = dir.join("settings.json.ai-usage.bak");
-
-        if backup_path.exists() {
-            if !settings_path.exists() {
-                fs::copy(&backup_path, &settings_path)?;
-                fs::remove_file(&backup_path)?;
-                println!("Восстановлен {}", settings_path.display());
-                continue;
-            }
-
-            let mut current: Value = serde_json::from_str(&fs::read_to_string(&settings_path)?)?;
-            let backup: Value = serde_json::from_str(&fs::read_to_string(&backup_path)?)?;
-            let current_is_ours = current
-                .pointer("/statusLine/command")
-                .and_then(Value::as_str)
-                .map(|command| command.contains("ai-usage") && command.contains(&id))
-                .unwrap_or(false);
-
-            if current_is_ours {
-                let previous_status_line = backup.get("statusLine").cloned();
-                if let Some(object) = current.as_object_mut() {
-                    match previous_status_line {
-                        Some(value) => {
-                            object.insert("statusLine".to_owned(), value);
-                        }
-                        None => {
-                            object.remove("statusLine");
-                        }
-                    }
-                }
-                crate::util::atomic_write(
-                    &settings_path,
-                    serde_json::to_string_pretty(&current)?.as_bytes(),
-                )?;
-                println!("Восстановлен statusLine в {}", settings_path.display());
-            } else {
-                println!(
-                    "statusLine в {} уже изменён пользователем; оставляю его как есть",
-                    settings_path.display()
-                );
-            }
-            fs::remove_file(&backup_path)?;
-            continue;
-        }
-
-        if !settings_path.exists() {
-            continue;
-        }
-        let raw = fs::read_to_string(&settings_path)?;
-        let mut settings: Value = serde_json::from_str(&raw)?;
-        let should_remove = settings
-            .pointer("/statusLine/command")
-            .and_then(Value::as_str)
-            .map(|command| command.contains("ai-usage") && command.contains(&id))
-            .unwrap_or(false);
-        if should_remove {
-            if let Some(object) = settings.as_object_mut() {
-                object.remove("statusLine");
-            }
-            crate::util::atomic_write(
-                &settings_path,
-                serde_json::to_string_pretty(&settings)?.as_bytes(),
-            )?;
-            println!("Удалён AI Usage hook из {}", settings_path.display());
+    for account in &config.accounts {
+        if let AccountConfig::Claude { id, config_dir, .. } = account {
+            let outcome = restore_claude_account(id, config_dir)?;
+            println!(
+                "{}",
+                outcome.describe(&crate::util::expand_home(config_dir))
+            );
         }
     }
     Ok(())
 }
 
-fn save_secret(key: &str, value: &str) -> Result<()> {
+/// Что именно сделало восстановление. Отдельный тип нужен, чтобы тесты могли
+/// проверять решение, а не разбирать печатаемый текст.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// Настроек не было и до установки.
+    NothingToDo,
+    /// Файл целиком вернули из backup.
+    RestoredFromBackup,
+    /// Вернули прежнее значение `statusLine`.
+    RestoredStatusLine,
+    /// `statusLine` не было до установки — просто убрали наш.
+    RemovedHook,
+    /// Пользователь поменял `statusLine` после установки: не трогаем.
+    KeptUserValue,
+}
+
+impl RestoreOutcome {
+    fn describe(&self, path: &Path) -> String {
+        let path = path.join("settings.json");
+        match self {
+            Self::NothingToDo => format!("Нечего восстанавливать в {}", path.display()),
+            Self::RestoredFromBackup => format!("Восстановлен {}", path.display()),
+            Self::RestoredStatusLine => {
+                format!("Восстановлен statusLine в {}", path.display())
+            }
+            Self::RemovedHook => format!("Удалён AI Usage hook из {}", path.display()),
+            Self::KeptUserValue => format!(
+                "statusLine в {} изменён пользователем; оставляю его как есть",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// Восстанавливает Claude `settings.json` одного аккаунта.
+///
+/// Главный инвариант: если пользователь поменял `statusLine` уже после нашей
+/// установки, его значение важнее backup и перезаписывать его нельзя.
+pub fn restore_claude_account(account_id: &str, config_dir: &Path) -> Result<RestoreOutcome> {
+    let dir = crate::util::expand_home(config_dir);
+    let settings_path = dir.join("settings.json");
+    let backup_path = dir.join("settings.json.ai-usage.bak");
+
+    if backup_path.exists() {
+        if !settings_path.exists() {
+            fs::copy(&backup_path, &settings_path)?;
+            fs::remove_file(&backup_path)?;
+            return Ok(RestoreOutcome::RestoredFromBackup);
+        }
+
+        let mut current: Value = serde_json::from_str(&fs::read_to_string(&settings_path)?)?;
+        let backup: Value = serde_json::from_str(&fs::read_to_string(&backup_path)?)?;
+
+        let outcome = if is_our_hook(&current, account_id) {
+            let previous = backup.get("statusLine").cloned();
+            if let Some(object) = current.as_object_mut() {
+                match previous.clone() {
+                    Some(value) => {
+                        object.insert("statusLine".to_owned(), value);
+                    }
+                    None => {
+                        object.remove("statusLine");
+                    }
+                }
+            }
+            crate::util::atomic_write(
+                &settings_path,
+                serde_json::to_string_pretty(&current)?.as_bytes(),
+            )?;
+            if previous.is_some() {
+                RestoreOutcome::RestoredStatusLine
+            } else {
+                RestoreOutcome::RemovedHook
+            }
+        } else {
+            RestoreOutcome::KeptUserValue
+        };
+
+        fs::remove_file(&backup_path)?;
+        return Ok(outcome);
+    }
+
+    if !settings_path.exists() {
+        return Ok(RestoreOutcome::NothingToDo);
+    }
+
+    let mut settings: Value = serde_json::from_str(&fs::read_to_string(&settings_path)?)?;
+    if !is_our_hook(&settings, account_id) {
+        return Ok(RestoreOutcome::KeptUserValue);
+    }
+
+    if let Some(object) = settings.as_object_mut() {
+        object.remove("statusLine");
+    }
+    crate::util::atomic_write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings)?.as_bytes(),
+    )?;
+    Ok(RestoreOutcome::RemovedHook)
+}
+
+/// Хвост команды, по которому мы узнаём собственный hook.
+///
+/// Опознавать по подстроке «ai-usage» в пути к бинарнику нельзя: путь зависит
+/// от того, куда установлено приложение, и может как случайно совпасть, так и
+/// не совпасть вовсе.
+fn hook_marker(account_id: &str) -> String {
+    format!(
+        "claude-hook --account {}",
+        crate::util::shell_single_quote(account_id)
+    )
+}
+
+fn is_our_hook(settings: &Value, account_id: &str) -> bool {
+    settings
+        .pointer("/statusLine/command")
+        .and_then(Value::as_str)
+        .map(|command| command.contains(&hook_marker(account_id)))
+        .unwrap_or(false)
+}
+
+pub fn save_secret(key: &str, value: &str) -> Result<()> {
     let path = crate::util::secrets_file()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -305,14 +373,15 @@ fn save_secret(key: &str, value: &str) -> Result<()> {
         }
     }
     values.insert(key.to_owned(), value.to_owned());
-    let contents = values
-        .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    crate::util::atomic_write_mode(&path, contents.as_bytes(), Some(0o600))?;
+    crate::util::atomic_write_mode(&path, render_secrets(&values).as_bytes(), Some(0o600))?;
     Ok(())
+}
+
+fn render_secrets(values: &BTreeMap<String, String>) -> String {
+    values
+        .iter()
+        .map(|(key, value)| format!("{key}={value}\n"))
+        .collect()
 }
 
 fn prompt(label: &str, default: Option<&str>) -> Result<String> {
@@ -374,4 +443,296 @@ fn restart_service() {
     let _ = Command::new("systemctl")
         .args(["--user", "restart", "ai-usage.service"])
         .status();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Сценарии C2 из `docs/handoff/TESTING.md`: установка hook поверх разных
+    /// исходных `settings.json` и обратимость этой операции.
+    struct Profile {
+        dir: PathBuf,
+    }
+
+    impl Profile {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "ai-usage-claude-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self { dir }
+        }
+
+        fn settings_path(&self) -> PathBuf {
+            self.dir.join("settings.json")
+        }
+
+        fn backup_path(&self) -> PathBuf {
+            self.dir.join("settings.json.ai-usage.bak")
+        }
+
+        fn write_settings(&self, value: Value) {
+            fs::write(
+                self.settings_path(),
+                serde_json::to_string_pretty(&value).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn settings(&self) -> Value {
+            serde_json::from_str(&fs::read_to_string(self.settings_path()).unwrap()).unwrap()
+        }
+
+        fn install(&self, account_id: &str) {
+            install_claude_status_line(account_id, &self.dir).unwrap();
+        }
+
+        fn restore(&self, account_id: &str) -> RestoreOutcome {
+            restore_claude_account(account_id, &self.dir).unwrap()
+        }
+    }
+
+    impl Drop for Profile {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn user_status_line() -> Value {
+        json!({"type": "command", "command": "my-own-statusline.sh", "padding": 1})
+    }
+
+    #[test]
+    fn c2_1_no_settings_before_install() {
+        let profile = Profile::new("c2-1");
+        profile.install("claude-main");
+
+        assert!(profile.settings_path().exists());
+        // Backup не создаётся, если нечего сохранять.
+        assert!(!profile.backup_path().exists());
+
+        assert_eq!(profile.restore("claude-main"), RestoreOutcome::RemovedHook);
+        assert!(profile.settings().get("statusLine").is_none());
+    }
+
+    #[test]
+    fn c2_2_settings_without_status_line() {
+        let profile = Profile::new("c2-2");
+        profile.write_settings(json!({"theme": "dark", "permissions": {"defaultMode": "ask"}}));
+        profile.install("claude-main");
+
+        assert!(profile.backup_path().exists());
+        assert_eq!(profile.restore("claude-main"), RestoreOutcome::RemovedHook);
+
+        let settings = profile.settings();
+        assert!(settings.get("statusLine").is_none());
+        // Остальные пользовательские настройки обязаны уцелеть.
+        assert_eq!(settings["theme"], "dark");
+        assert_eq!(settings["permissions"]["defaultMode"], "ask");
+        assert!(!profile.backup_path().exists());
+    }
+
+    #[test]
+    fn c2_3_existing_user_status_line_is_restored() {
+        let profile = Profile::new("c2-3");
+        profile.write_settings(json!({"theme": "dark", "statusLine": user_status_line()}));
+        profile.install("claude-main");
+
+        // После установки в файле наша команда.
+        assert!(profile.settings()["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("claude-hook"));
+
+        assert_eq!(
+            profile.restore("claude-main"),
+            RestoreOutcome::RestoredStatusLine
+        );
+        assert_eq!(profile.settings()["statusLine"], user_status_line());
+        assert_eq!(profile.settings()["theme"], "dark");
+    }
+
+    #[test]
+    fn c2_4_user_edit_after_install_is_not_overwritten() {
+        let profile = Profile::new("c2-4");
+        profile.write_settings(json!({"statusLine": user_status_line()}));
+        profile.install("claude-main");
+
+        // Пользователь снова поменял statusLine уже после установки.
+        let newer = json!({"type": "command", "command": "even-newer.sh"});
+        profile.write_settings(json!({"statusLine": newer.clone()}));
+
+        assert_eq!(
+            profile.restore("claude-main"),
+            RestoreOutcome::KeptUserValue
+        );
+        assert_eq!(
+            profile.settings()["statusLine"],
+            newer,
+            "более новое значение пользователя нельзя перезаписывать backup'ом"
+        );
+        // Backup всё равно убирается, чтобы не оставлять мусор.
+        assert!(!profile.backup_path().exists());
+    }
+
+    #[test]
+    fn c2_5_two_profiles_are_independent() {
+        let work = Profile::new("c2-5-work");
+        let personal = Profile::new("c2-5-personal");
+        work.write_settings(json!({"theme": "work"}));
+        personal.write_settings(json!({"theme": "personal"}));
+
+        work.install("claude-work");
+        personal.install("claude-personal");
+
+        assert!(work.settings()["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("claude-work"));
+        assert!(personal.settings()["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("claude-personal"));
+
+        work.restore("claude-work");
+        assert!(work.settings().get("statusLine").is_none());
+        // Удаление одного профиля не должно трогать другой.
+        assert!(personal.settings().get("statusLine").is_some());
+        assert_eq!(personal.settings()["theme"], "personal");
+    }
+
+    #[test]
+    fn restore_does_not_touch_a_hook_belonging_to_another_account() {
+        let profile = Profile::new("foreign-hook");
+        profile.install("claude-work");
+
+        assert_eq!(
+            profile.restore("claude-personal"),
+            RestoreOutcome::KeptUserValue
+        );
+        assert!(profile.settings()["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("claude-work"));
+    }
+
+    #[test]
+    fn reinstall_does_not_overwrite_the_original_backup() {
+        let profile = Profile::new("double-install");
+        profile.write_settings(json!({"statusLine": user_status_line()}));
+
+        profile.install("claude-main");
+        profile.install("claude-main");
+
+        let backup: Value =
+            serde_json::from_str(&fs::read_to_string(profile.backup_path()).unwrap()).unwrap();
+        assert_eq!(
+            backup["statusLine"],
+            user_status_line(),
+            "второй install перезаписал backup нашей же командой"
+        );
+
+        profile.restore("claude-main");
+        assert_eq!(profile.settings()["statusLine"], user_status_line());
+    }
+
+    #[test]
+    fn restore_is_idempotent() {
+        let profile = Profile::new("idempotent");
+        profile.write_settings(json!({"theme": "dark"}));
+        profile.install("claude-main");
+
+        profile.restore("claude-main");
+        let after_first = profile.settings();
+        // Второй запуск не должен ни падать, ни менять файл.
+        assert_eq!(
+            profile.restore("claude-main"),
+            RestoreOutcome::KeptUserValue
+        );
+        assert_eq!(profile.settings(), after_first);
+    }
+
+    #[test]
+    fn restore_on_untouched_profile_is_a_no_op() {
+        let profile = Profile::new("untouched");
+        assert_eq!(profile.restore("claude-main"), RestoreOutcome::NothingToDo);
+        assert!(!profile.settings_path().exists());
+    }
+
+    #[test]
+    fn install_rejects_a_non_object_settings_root() {
+        let profile = Profile::new("bad-root");
+        fs::write(profile.settings_path(), "[1, 2, 3]").unwrap();
+        assert!(install_claude_status_line("claude-main", &profile.dir).is_err());
+    }
+
+    #[test]
+    fn install_refuses_to_clobber_invalid_json() {
+        // Лучше упасть, чем потерять файл, который пользователь просто не дописал.
+        let profile = Profile::new("bad-json");
+        fs::write(profile.settings_path(), "{ broken").unwrap();
+        assert!(install_claude_status_line("claude-main", &profile.dir).is_err());
+        assert_eq!(
+            fs::read_to_string(profile.settings_path()).unwrap(),
+            "{ broken"
+        );
+    }
+
+    #[test]
+    fn hook_command_quotes_paths_with_spaces() {
+        let profile = Profile::new("quoting");
+        profile.install("claude-main");
+        let command = profile.settings()["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        assert!(command.starts_with('\''), "путь не в кавычках: {command}");
+        assert!(command.contains("claude-hook --account 'claude-main'"));
+    }
+
+    #[test]
+    fn hook_detection_does_not_depend_on_the_binary_path() {
+        // Раньше признаком служила подстрока 'ai-usage' в пути; тогда hook,
+        // установленный из каталога с другим именем, переставал опознаваться.
+        let settings = json!({
+            "statusLine": {
+                "type": "command",
+                "command": "'/opt/tools/bin/usage-widget' claude-hook --account 'claude-main'"
+            }
+        });
+        assert!(is_our_hook(&settings, "claude-main"));
+        assert!(!is_our_hook(&settings, "claude-work"));
+    }
+
+    #[test]
+    fn similar_account_ids_are_not_confused() {
+        let settings = json!({
+            "statusLine": {"type": "command", "command": "x claude-hook --account 'claude'"}
+        });
+        assert!(is_our_hook(&settings, "claude"));
+        // 'claude-main' начинается с 'claude', но это другой аккаунт.
+        assert!(!is_our_hook(&settings, "claude-main"));
+    }
+
+    #[test]
+    fn a_user_command_merely_mentioning_the_project_is_not_ours() {
+        let settings = json!({
+            "statusLine": {"type": "command", "command": "/home/u/ai-usage-scripts/mine.sh"}
+        });
+        assert!(!is_our_hook(&settings, "claude-main"));
+    }
+
+    #[test]
+    fn saved_secret_keeps_other_keys() {
+        let mut values = BTreeMap::new();
+        values.insert("A".to_owned(), "1".to_owned());
+        values.insert("B".to_owned(), "2".to_owned());
+        let rendered = render_secrets(&values);
+        assert_eq!(rendered, "A=1\nB=2\n");
+    }
 }
