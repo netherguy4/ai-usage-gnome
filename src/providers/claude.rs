@@ -83,13 +83,16 @@ pub fn windows_from_usage(raw: &str) -> Result<Vec<QuotaWindow>> {
                 Some(model) => format!("{}:{}", entry.kind, model.to_lowercase()),
                 None => entry.kind.clone(),
             };
-            Some(QuotaWindow::new(
-                key,
-                label_for_kind(&entry.kind, model.as_deref(), duration),
-                percent,
-                duration,
-                entry.resets_at.as_deref().and_then(rfc3339_to_unix),
-            ))
+            Some(
+                QuotaWindow::new(
+                    key,
+                    label_for_kind(&entry.kind, model.as_deref(), duration),
+                    percent,
+                    duration,
+                    entry.resets_at.as_deref().and_then(rfc3339_to_unix),
+                )
+                .with_scope(model),
+            )
         })
         .collect();
 

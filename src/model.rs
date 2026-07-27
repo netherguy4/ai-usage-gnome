@@ -22,6 +22,13 @@ pub struct QuotaWindow {
     pub remaining_percent: f64,
     pub duration_mins: Option<u64>,
     pub resets_at: Option<i64>,
+    /// Модель, к которой привязан лимит, если он не общий.
+    ///
+    /// Исчерпанный общий лимит блокирует работу, а исчерпанный лимит одной
+    /// модели — нет: можно переключиться. UI обязан их различать, и опираться
+    /// на формат ключа для этого слишком хрупко.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 impl QuotaWindow {
@@ -46,7 +53,13 @@ impl QuotaWindow {
             remaining_percent: 100.0 - used_percent,
             duration_mins,
             resets_at,
+            scope: None,
         }
+    }
+
+    pub fn with_scope(mut self, scope: Option<String>) -> Self {
+        self.scope = scope;
+        self
     }
 }
 

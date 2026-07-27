@@ -1,5 +1,22 @@
 .ai-usage-panel-label {
   margin-left: 4px;
+  margin-right: 6px;
+}
+
+.ai-usage-panel-label:last-child {
+  margin-right: 0;
+}
+
+.ai-usage-panel-icon {
+  icon-size: 14px;
+}
+
+.ai-usage-menu-row {
+  spacing: 8px;
+}
+
+.ai-usage-menu-icon {
+  icon-size: 16px;
 }
 
 .ai-usage-header {

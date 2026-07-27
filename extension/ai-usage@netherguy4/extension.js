@@ -9,20 +9,18 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const REFRESH_SECONDS = 60;
+const FIVE_HOUR_MINS = 300;
+const WEEKLY_MINS = 10080;
 
 export default class AiUsageExtension extends Extension {
     enable() {
         this._state = null;
         this._reloadSource = 0;
+        this._iconDir = this.dir.get_child('icons');
 
         this._indicator = new PanelMenu.Button(0.0, this.metadata.name, false);
-        // Значка нет намеренно: он не нёс информации, а место в панели занимал.
-        this._label = new St.Label({
-            text: 'AI',
-            y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'ai-usage-panel-label',
-        });
-        this._indicator.add_child(this._label);
+        this._panelBox = new St.BoxLayout({style_class: 'panel-status-menu-box'});
+        this._indicator.add_child(this._panelBox);
         Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
 
         const runtimeDir = GLib.get_user_runtime_dir();
@@ -60,7 +58,9 @@ export default class AiUsageExtension extends Extension {
         this._monitorChangedId = 0;
         this._indicator?.destroy();
         this._indicator = null;
+        this._panelBox = null;
         this._stateFile = null;
+        this._iconDir = null;
         this._state = null;
     }
 
@@ -81,14 +81,23 @@ export default class AiUsageExtension extends Extension {
             this._render();
         } catch (error) {
             this._state = null;
-            this._label.text = 'AI …';
+            this._renderPanel([{provider: null, text: '…'}]);
             this._renderEmpty(error);
         }
     }
 
+    /// Иконка провайдера из каталога расширения. Имя оканчивается на
+    /// `-symbolic.svg`, поэтому GNOME перекрашивает её под тему панели.
+    _providerIcon(provider) {
+        if (!provider || !this._iconDir)
+            return null;
+        const file = this._iconDir.get_child(`ai-usage-${provider}-symbolic.svg`);
+        return file.query_exists(null) ? new Gio.FileIcon({file}) : null;
+    }
+
     _renderEmpty(error) {
         this._indicator.menu.removeAll();
-        this._addItem('AI Usage', true);
+        this._addItem('AI Usage', {header: true});
         this._addItem('Ожидание данных от ai-usage.service');
         const message = String(error?.message ?? error ?? 'state.json отсутствует');
         this._addItem(message.length > 80 ? `${message.slice(0, 77)}…` : message);
@@ -97,10 +106,10 @@ export default class AiUsageExtension extends Extension {
     _render() {
         const accounts = Array.isArray(this._state?.accounts) ? this._state.accounts : [];
         this._indicator.menu.removeAll();
-        this._addItem('AI Usage', true);
+        this._addItem('AI Usage', {header: true});
 
         if (accounts.length === 0) {
-            this._label.text = 'AI';
+            this._renderPanel([]);
             this._addItem('Аккаунты не настроены');
             this._addItem('Запусти: ai-usage setup');
             return;
@@ -113,90 +122,127 @@ export default class AiUsageExtension extends Extension {
                 this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
             const subtitle = [account.plan, account.email].filter(Boolean).join(' · ');
-            this._addItem(`${providerIcon(account.provider)} ${account.name}${subtitle ? ` — ${subtitle}` : ''}`, true);
+            this._addItem(`${account.name}${subtitle ? ` — ${subtitle}` : ''}`, {
+                header: true,
+                gicon: this._providerIcon(account.provider),
+            });
 
             const windows = Array.isArray(account.windows) ? account.windows : [];
-            const hasBalances = Array.isArray(account.balances) && account.balances.length > 0;
+            const balances = Array.isArray(account.balances) ? account.balances : [];
             const stale = account.status === 'stale';
 
             for (const window of windows)
                 this._addItem(formatWindow(window));
+            for (const balance of balances)
+                this._addItem(`Баланс: ${formatMoney(balance.total, balance.currency)}`);
 
-            const headline = panelWindow(windows);
-            if (hasBalances) {
-                for (const balance of account.balances)
-                    this._addItem(`Баланс: ${formatMoney(balance.total, balance.currency)}`);
-            }
-
-            // Возраст показываем всегда, когда данные есть: без него нельзя
-            // отличить свежий ноль от давно не обновлявшегося.
-            if (windows.length || hasBalances) {
-                const age = formatAge(account.updated_at);
-                if (age)
-                    this._addItem(`Обновлено: ${age}`, false, stale ? 'ai-usage-stale' : null);
-            }
-
-            if (!windows.length && !hasBalances) {
+            if (!windows.length && !balances.length) {
                 // Данных нет вовсе — показываем причину вместо пустоты.
-                this._addItem(account.error || statusText(account.status), false, 'ai-usage-error');
+                this._addItem(account.error || statusText(account.status), {style: 'ai-usage-error'});
             } else if (account.error) {
                 // Данные есть, но устарели или последнее обновление не удалось.
-                this._addItem(`⚠ ${account.error}`, false, stale ? 'ai-usage-stale' : 'ai-usage-error');
+                // Возраст живёт в тексте ошибки: отдельной строки «Обновлено»
+                // нет, пока всё в порядке она была лишним шумом.
+                this._addItem(`⚠ ${account.error}`, {style: stale ? 'ai-usage-stale' : 'ai-usage-error'});
             }
 
             summary.push({
-                icon: providerIcon(account.provider),
-                remaining: headline === null ? null : effectiveRemaining(headline),
-                // У провайдера может не быть лимитов вовсе — только баланс.
-                // Тогда в панель идут деньги, иначе аккаунт выглядел бы сломанным.
-                balance: headline === null && hasBalances
-                    ? formatMoney(account.balances[0].total, account.balances[0].currency)
-                    : null,
-                stale,
+                provider: account.provider,
+                text: panelText(windows, balances, stale),
             });
         });
 
-        this._label.text = panelLabel(summary);
+        this._renderPanel(summary);
     }
 
-    _addItem(text, header = false, styleClass = null) {
-        const item = new PopupMenu.PopupMenuItem(text, {reactive: false});
+    _renderPanel(summary) {
+        if (!this._panelBox)
+            return;
+        this._panelBox.destroy_all_children();
+
+        if (!summary.length) {
+            this._panelBox.add_child(new St.Label({
+                text: 'AI',
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'ai-usage-panel-label',
+            }));
+            return;
+        }
+
+        for (const entry of summary) {
+            const gicon = this._providerIcon(entry.provider);
+            if (gicon) {
+                this._panelBox.add_child(new St.Icon({
+                    gicon,
+                    style_class: 'system-status-icon ai-usage-panel-icon',
+                }));
+            }
+            this._panelBox.add_child(new St.Label({
+                text: entry.text,
+                y_align: Clutter.ActorAlign.CENTER,
+                style_class: 'ai-usage-panel-label',
+            }));
+        }
+    }
+
+    _addItem(text, {header = false, style = null, gicon = null} = {}) {
+        // Собираем строку сами, а не через PopupImageMenuItem: порядок детей
+        // у базового пункта меняется между версиями GNOME.
+        const item = new PopupMenu.PopupBaseMenuItem({reactive: false});
+        const box = new St.BoxLayout({style_class: 'ai-usage-menu-row'});
+        if (gicon)
+            box.add_child(new St.Icon({gicon, style_class: 'popup-menu-icon ai-usage-menu-icon'}));
+
+        const label = new St.Label({text, y_align: Clutter.ActorAlign.CENTER});
         if (header)
-            item.label.add_style_class_name('ai-usage-header');
-        if (styleClass)
-            item.label.add_style_class_name(styleClass);
+            label.add_style_class_name('ai-usage-header');
+        if (style)
+            label.add_style_class_name(style);
+        box.add_child(label);
+
+        item.add_child(box);
         this._indicator.menu.addMenuItem(item);
     }
-
 }
-
-function providerIcon(provider) {
-    switch (provider) {
-    case 'claude': return '◈';
-    case 'codex': return '⌘';
-    case 'deepseek': return '◆';
-    default: return '•';
-    }
-}
-
-const FIVE_HOUR_MINS = 300;
-const WEEKLY_MINS = 10080;
 
 // Какое окно выносить в панель.
 //
-// Не минимум по всем окнам: у Claude отдельный лимит модели может быть
-// исчерпан, и панель показывала бы 0%, хотя работать ещё можно. Нужен тот
-// лимит, который упирается первым в обычной работе, — пятичасовой; если у
-// тарифа его нет (Codex plus), то недельный.
+// Правило блокировки идёт первым: если исчерпан общий лимит, запас в коротком
+// окне уже ничего не значит — работать нельзя, и панель обязана показать 0%.
 //
-// windows отсортированы по длительности, затем по ключу, поэтому первое
-// совпадение по длительности — самое общее окно, а не привязанное к модели.
+// Лимиты, привязанные к модели, из этого правила исключены: исчерпанный лимит
+// одной модели не блокирует работу, достаточно переключиться. Именно поэтому
+// панель не берёт минимум по всем окнам подряд.
+//
+// В остальном показывается пятичасовое окно, а при его отсутствии (Codex plus)
+// — недельное. windows отсортированы по длительности и ключу, поэтому первое
+// совпадение по длительности — самое общее окно.
 function panelWindow(windows) {
     if (!windows.length)
         return null;
-    return windows.find(w => w.duration_mins === FIVE_HOUR_MINS)
-        ?? windows.find(w => w.duration_mins === WEEKLY_MINS)
-        ?? windows[0];
+
+    const general = windows.filter(w => !w.scope);
+    const pool = general.length ? general : windows;
+
+    const blocked = pool.find(w => effectiveRemaining(w) <= 0);
+    if (blocked)
+        return blocked;
+
+    return pool.find(w => w.duration_mins === FIVE_HOUR_MINS)
+        ?? pool.find(w => w.duration_mins === WEEKLY_MINS)
+        ?? pool[0];
+}
+
+// Текст рядом со значком провайдера в панели.
+function panelText(windows, balances, stale) {
+    const mark = stale ? '~' : '';
+    const headline = panelWindow(windows);
+    if (headline)
+        return `${Math.round(effectiveRemaining(headline))}%${mark}`;
+    // У провайдера может не быть лимитов вовсе — только баланс.
+    if (balances.length)
+        return `${formatMoney(balances[0].total, balances[0].currency)}${mark}`;
+    return '!';
 }
 
 function effectiveRemaining(window) {
@@ -253,43 +299,4 @@ function statusText(status) {
     case 'error': return 'Провайдер недоступен';
     default: return 'Нет данных';
     }
-}
-
-// Метка панели: значок провайдера и его худший остаток, по одному на аккаунт.
-// Общий минимум по всем аккаунтам был неоднозначен — по числу нельзя было
-// понять, чей лимит заканчивается.
-//
-// '~' помечает устаревшие данные, '!' — аккаунт без данных вовсе.
-function panelLabel(summary) {
-    if (!summary.length)
-        return 'AI';
-
-    const parts = summary.map(entry => {
-        const mark = entry.stale ? '~' : '';
-        if (entry.remaining !== null)
-            return `${entry.icon} ${Math.round(entry.remaining)}%${mark}`;
-        if (entry.balance)
-            return `${entry.icon} ${entry.balance}${mark}`;
-        return `${entry.icon} !`;
-    });
-    return parts.join(' ');
-}
-
-function formatAge(updatedAt) {
-    const timestamp = Number(updatedAt);
-    if (!Number.isFinite(timestamp) || timestamp <= 0)
-        return '';
-    const seconds = Math.floor(Date.now() / 1000) - timestamp;
-    // Часы пользователя могут отставать от времени записи state.json.
-    if (seconds < 0)
-        return 'только что';
-    if (seconds < 90)
-        return 'только что';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60)
-        return `${minutes} мин назад`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24)
-        return `${hours} ч назад`;
-    return `${Math.floor(hours / 24)} д назад`;
 }
