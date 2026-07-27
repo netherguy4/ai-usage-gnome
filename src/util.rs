@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,7 +45,9 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 pub fn claude_cache_file(account_id: &str) -> Result<PathBuf> {
-    Ok(data_dir()?.join("claude").join(format!("{account_id}.json")))
+    Ok(data_dir()?
+        .join("claude")
+        .join(format!("{account_id}.json")))
 }
 
 pub fn secrets_file() -> Result<PathBuf> {
@@ -53,18 +56,33 @@ pub fn secrets_file() -> Result<PathBuf> {
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_mode(path, bytes, None)
+}
+
+/// Записывает файл атомарно. `mode` выставляется на временном файле до `rename`,
+/// поэтому итоговый файл никогда не существует с более широкими правами.
+pub fn atomic_write_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     {
-        let mut file = fs::File::create(&tmp)
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        if let Some(mode) = mode {
+            options.mode(mode);
+        }
+        let mut file = options
+            .open(&tmp)
             .with_context(|| format!("Не удалось создать {}", tmp.display()))?;
+        if let Some(mode) = mode {
+            // create-time mode проходит через umask, поэтому фиксируем права явно.
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
         file.write_all(bytes)?;
         file.sync_all()?;
     }
-    fs::rename(&tmp, path)
-        .with_context(|| format!("Не удалось заменить {}", path.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("Не удалось заменить {}", path.display()))?;
     Ok(())
 }
 

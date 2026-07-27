@@ -57,7 +57,9 @@ impl AccountConfig {
 
     pub fn name(&self) -> &str {
         match self {
-            Self::Claude { name, .. } | Self::Codex { name, .. } | Self::Deepseek { name, .. } => name,
+            Self::Claude { name, .. } | Self::Codex { name, .. } | Self::Deepseek { name, .. } => {
+                name
+            }
         }
     }
 
@@ -113,7 +115,11 @@ pub fn save(config: &Config) -> Result<PathBuf> {
 }
 
 pub fn upsert_account(config: &mut Config, account: AccountConfig) {
-    if let Some(index) = config.accounts.iter().position(|item| item.id() == account.id()) {
+    if let Some(index) = config
+        .accounts
+        .iter()
+        .position(|item| item.id() == account.id())
+    {
         config.accounts[index] = account;
     } else {
         config.accounts.push(account);

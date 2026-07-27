@@ -1,10 +1,26 @@
 use std::env;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use serde::Deserialize;
 
 use crate::model::{AccountState, BalanceInfo};
+
+/// Общий HTTP-клиент. Без явных таймаутов зависший запрос задерживал бы весь
+/// refresh cycle, а новый Client на каждый вызов терял бы connection pool.
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(5))
+            .user_agent(concat!("ai-usage/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("не удалось создать HTTP-клиент")
+    })
+}
 
 #[derive(Debug, Deserialize)]
 struct BalanceResponse {
@@ -21,15 +37,20 @@ struct RawBalance {
     topped_up_balance: Option<String>,
 }
 
-pub async fn fetch(id: &str, name: &str, api_key_env: &str, base_url: &str) -> Result<AccountState> {
-    let api_key = env::var(api_key_env)
-        .with_context(|| format!("Переменная {api_key_env} не задана"))?;
+pub async fn fetch(
+    id: &str,
+    name: &str,
+    api_key_env: &str,
+    base_url: &str,
+) -> Result<AccountState> {
+    let api_key =
+        env::var(api_key_env).with_context(|| format!("Переменная {api_key_env} не задана"))?;
     if api_key.trim().is_empty() {
         bail!("Переменная {api_key_env} пуста");
     }
 
     let endpoint = format!("{}/user/balance", base_url.trim_end_matches('/'));
-    let response = reqwest::Client::new()
+    let response = client()
         .get(endpoint)
         .header(ACCEPT, "application/json")
         .header(AUTHORIZATION, format!("Bearer {api_key}"))
@@ -52,7 +73,12 @@ pub async fn fetch(id: &str, name: &str, api_key_env: &str, base_url: &str) -> R
         id: id.to_owned(),
         name: name.to_owned(),
         provider: "deepseek".to_owned(),
-        status: if payload.is_available { "ok" } else { "depleted" }.to_owned(),
+        status: if payload.is_available {
+            "ok"
+        } else {
+            "depleted"
+        }
+        .to_owned(),
         plan: Some("API".to_owned()),
         email: None,
         model: None,

@@ -24,14 +24,17 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
-      - name: Format Rust sources
-        run: cargo fmt --all
-
-      - name: Rust tests
-        run: cargo test --all-targets
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --all-targets --locked
+
+      - name: Release build
+        run: cargo build --release --locked
 
       - name: Check GNOME extension syntax
         run: node --check extension/ai-usage@netherguy4/extension.js
@@ -41,3 +44,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
           shellcheck install.sh uninstall.sh install-online.sh scripts/package.sh
+
+  msrv:
+    name: Build on declared MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          VERSION="$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)"
+          [[ -n "$VERSION" ]] || { echo "rust-version not found in Cargo.toml" >&2; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install "${{ steps.msrv.outputs.version }}" --profile minimal
+          rustup default "${{ steps.msrv.outputs.version }}"
+
+      - name: Check
+        run: cargo check --all-targets --locked

@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -19,7 +18,12 @@ pub fn run() -> Result<()> {
     } else {
         println!("Уже настроено:");
         for account in &config.accounts {
-            println!("  • {} ({}, {})", account.name(), account.provider(), account.id());
+            println!(
+                "  • {} ({}, {})",
+                account.name(),
+                account.provider(),
+                account.id()
+            );
         }
     }
 
@@ -71,7 +75,7 @@ fn add_claude(config: &mut Config) -> Result<()> {
     config::save(config)?;
 
     println!("Claude hook установлен.");
-    if config_dir != PathBuf::from("~/.claude") {
+    if config_dir.as_os_str() != "~/.claude" {
         println!(
             "Запуск этого профиля: CLAUDE_CONFIG_DIR={} claude",
             config_dir.display()
@@ -200,17 +204,17 @@ fn install_claude_status_line(account_id: &str, config_dir: &Path) -> Result<()>
         }),
     );
 
-    crate::util::atomic_write(&settings_path, serde_json::to_string_pretty(&settings)?.as_bytes())?;
+    crate::util::atomic_write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings)?.as_bytes(),
+    )?;
     Ok(())
 }
 
 pub fn restore_claude_hooks() -> Result<()> {
     let config = config::load()?;
     for account in config.accounts {
-        let AccountConfig::Claude {
-            id, config_dir, ..
-        } = account
-        else {
+        let AccountConfig::Claude { id, config_dir, .. } = account else {
             continue;
         };
         let dir = crate::util::expand_home(&config_dir);
@@ -293,7 +297,10 @@ fn save_secret(key: &str, value: &str) -> Result<()> {
     if path.exists() {
         for line in fs::read_to_string(&path)?.lines() {
             if let Some((existing_key, existing_value)) = line.split_once('=') {
-                values.insert(existing_key.trim().to_owned(), existing_value.trim().to_owned());
+                values.insert(
+                    existing_key.trim().to_owned(),
+                    existing_value.trim().to_owned(),
+                );
             }
         }
     }
@@ -304,8 +311,7 @@ fn save_secret(key: &str, value: &str) -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    crate::util::atomic_write(&path, contents.as_bytes())?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    crate::util::atomic_write_mode(&path, contents.as_bytes(), Some(0o600))?;
     Ok(())
 }
 
@@ -331,7 +337,10 @@ fn yes_no(label: &str, default: bool) -> Result<bool> {
     if answer.is_empty() {
         return Ok(default);
     }
-    Ok(matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes" | "д" | "да"))
+    Ok(matches!(
+        answer.to_ascii_lowercase().as_str(),
+        "y" | "yes" | "д" | "да"
+    ))
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -342,12 +351,13 @@ fn non_empty(value: String) -> Option<String> {
     }
 }
 
-
 fn resolve_command(command: &str) -> Option<String> {
     let path = Path::new(command);
     if path.components().count() > 1 {
         let expanded = crate::util::expand_home(path);
-        return expanded.exists().then(|| expanded.to_string_lossy().into_owned());
+        return expanded
+            .exists()
+            .then(|| expanded.to_string_lossy().into_owned());
     }
 
     let search_path = std::env::var_os("PATH")?;

@@ -16,7 +16,11 @@ use serde::Deserialize;
 use tokio::task::JoinSet;
 
 #[derive(Debug, Parser)]
-#[command(name = "ai-usage", version, about = "Claude, Codex and DeepSeek usage for GNOME")]
+#[command(
+    name = "ai-usage",
+    version,
+    about = "Claude, Codex and DeepSeek usage for GNOME"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -94,10 +98,32 @@ async fn once() -> Result<()> {
     Ok(())
 }
 
+/// Верхняя граница на один provider fetch. Провайдер, вышедший за неё,
+/// становится обычным error state и не задерживает остальные аккаунты.
+const PROVIDER_DEADLINE: Duration = Duration::from_secs(30);
+
 async fn refresh(config: &config::Config) -> AppState {
     let mut tasks = JoinSet::new();
     for (index, account) in config.accounts.iter().cloned().enumerate() {
-        tasks.spawn(async move { (index, providers::fetch(account).await) });
+        tasks.spawn(async move {
+            let id = account.id().to_owned();
+            let name = account.name().to_owned();
+            let provider = account.provider();
+            let state =
+                match tokio::time::timeout(PROVIDER_DEADLINE, providers::fetch(account)).await {
+                    Ok(state) => state,
+                    Err(_) => model::AccountState::error(
+                        &id,
+                        &name,
+                        provider,
+                        format!(
+                            "Провайдер не ответил за {} секунд",
+                            PROVIDER_DEADLINE.as_secs()
+                        ),
+                    ),
+                };
+            (index, state)
+        });
     }
 
     let mut ordered = vec![None; config.accounts.len()];
@@ -148,7 +174,8 @@ fn claude_hook(account: &str) -> Result<()> {
     util::validate_id(account)?;
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
-    let input: ClaudeInput = serde_json::from_str(&raw).context("Claude hook получил некорректный JSON")?;
+    let input: ClaudeInput =
+        serde_json::from_str(&raw).context("Claude hook получил некорректный JSON")?;
     let model = input.model.and_then(|item| item.display_name);
     let five_hour = input
         .rate_limits
@@ -193,7 +220,11 @@ fn doctor() -> Result<()> {
         mark(config_path.exists()),
         config_path.display()
     );
-    println!("{} accounts: {}", mark(!config.accounts.is_empty()), config.accounts.len());
+    println!(
+        "{} accounts: {}",
+        mark(!config.accounts.is_empty()),
+        config.accounts.len()
+    );
 
     for account in &config.accounts {
         match account {
@@ -215,7 +246,12 @@ fn doctor() -> Result<()> {
                     })
                     .map(|command| command.contains("ai-usage") && command.contains(id))
                     .unwrap_or(false);
-                println!("{} Claude '{}': hook {}", mark(hooked), name, settings.display());
+                println!(
+                    "{} Claude '{}': hook {}",
+                    mark(hooked),
+                    name,
+                    settings.display()
+                );
             }
             config::AccountConfig::Codex {
                 name,
@@ -233,9 +269,7 @@ fn doctor() -> Result<()> {
                 );
             }
             config::AccountConfig::Deepseek {
-                name,
-                api_key_env,
-                ..
+                name, api_key_env, ..
             } => {
                 let present = std::env::var(api_key_env)
                     .map(|value| !value.trim().is_empty())
@@ -251,5 +285,9 @@ fn doctor() -> Result<()> {
 }
 
 fn mark(ok: bool) -> &'static str {
-    if ok { "[OK]" } else { "[WARN]" }
+    if ok {
+        "[OK]"
+    } else {
+        "[WARN]"
+    }
 }

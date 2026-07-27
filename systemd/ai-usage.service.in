@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=@BINARY@ daemon
+ExecStart="@BINARY@" daemon
 EnvironmentFile=-@SECRETS@
 Restart=on-failure
 RestartSec=5

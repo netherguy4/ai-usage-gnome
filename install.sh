@@ -21,6 +21,11 @@ for arg in "$@"; do
   esac
 done
 
+command -v python3 >/dev/null 2>&1 || {
+  echo "Required command not found: python3" >&2
+  exit 1
+}
+
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 EXT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$UUID"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ai-usage"
@@ -61,10 +66,21 @@ cp -a "$ROOT/extension/$UUID/." "$EXT_DIR/"
 
 touch "$SECRETS"
 chmod 600 "$SECRETS"
-sed \
-  -e "s|@BINARY@|$BINARY|g" \
-  -e "s|@SECRETS@|$SECRETS|g" \
-  "$ROOT/systemd/ai-usage.service.in" > "$SERVICE"
+# Подстановка через python3, а не sed: пути могут содержать |, & и обратные
+# слеши, которые sed интерпретирует как спецсимволы замены.
+BINARY="$BINARY" SECRETS="$SECRETS" python3 - \
+  "$ROOT/systemd/ai-usage.service.in" "$SERVICE" <<'PY'
+import os
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    text = handle.read()
+text = text.replace("@BINARY@", os.environ["BINARY"])
+text = text.replace("@SECRETS@", os.environ["SECRETS"])
+with open(target, "w", encoding="utf-8") as handle:
+    handle.write(text)
+PY
 
 "$BINARY" init
 

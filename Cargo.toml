@@ -5,7 +5,7 @@ edition = "2021"
 description = "GNOME panel widget backend for Claude, Codex and DeepSeek usage"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/netherguy4/ai-usage-gnome"
-rust-version = "1.80"
+rust-version = "1.86"
 
 [dependencies]
 anyhow = "1.0"
