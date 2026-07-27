@@ -92,7 +92,6 @@ export default class AiUsageExtension extends Extension {
         this._addItem('Ожидание данных от ai-usage.service');
         const message = String(error?.message ?? error ?? 'state.json отсутствует');
         this._addItem(message.length > 80 ? `${message.slice(0, 77)}…` : message);
-        this._addRefreshItem();
     }
 
     _render() {
@@ -104,7 +103,6 @@ export default class AiUsageExtension extends Extension {
             this._label.text = 'AI';
             this._addItem('Аккаунты не настроены');
             this._addItem('Запусти: ai-usage setup');
-            this._addRefreshItem();
             return;
         }
 
@@ -120,12 +118,11 @@ export default class AiUsageExtension extends Extension {
             const windows = Array.isArray(account.windows) ? account.windows : [];
             const hasBalances = Array.isArray(account.balances) && account.balances.length > 0;
             const stale = account.status === 'stale';
-            let worst = null;
 
-            for (const window of windows) {
+            for (const window of windows)
                 this._addItem(formatWindow(window));
-                worst = minValue(worst, effectiveRemaining(window));
-            }
+
+            const headline = panelWindow(windows);
             if (hasBalances) {
                 for (const balance of account.balances)
                     this._addItem(`Баланс: ${formatMoney(balance.total, balance.currency)}`);
@@ -149,14 +146,13 @@ export default class AiUsageExtension extends Extension {
 
             summary.push({
                 icon: providerIcon(account.provider),
-                remaining: worst,
+                remaining: headline === null ? null : effectiveRemaining(headline),
                 stale,
                 broken: account.status === 'error' || account.status === 'unauthenticated',
             });
         });
 
         this._label.text = panelLabel(summary);
-        this._addRefreshItem();
     }
 
     _addItem(text, header = false, styleClass = null) {
@@ -168,21 +164,6 @@ export default class AiUsageExtension extends Extension {
         this._indicator.menu.addMenuItem(item);
     }
 
-    _addRefreshItem() {
-        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        const refresh = new PopupMenu.PopupMenuItem('Обновить сейчас');
-        refresh.connect('activate', () => {
-            try {
-                Gio.Subprocess.new(
-                    ['systemctl', '--user', 'restart', 'ai-usage.service'],
-                    Gio.SubprocessFlags.NONE
-                );
-            } catch (error) {
-                console.error(`[AI Usage] refresh failed: ${error}`);
-            }
-        });
-        this._indicator.menu.addMenuItem(refresh);
-    }
 }
 
 function providerIcon(provider) {
@@ -194,11 +175,24 @@ function providerIcon(provider) {
     }
 }
 
-function minValue(current, value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric))
-        return current;
-    return current === null ? numeric : Math.min(current, numeric);
+const FIVE_HOUR_MINS = 300;
+const WEEKLY_MINS = 10080;
+
+// Какое окно выносить в панель.
+//
+// Не минимум по всем окнам: у Claude отдельный лимит модели может быть
+// исчерпан, и панель показывала бы 0%, хотя работать ещё можно. Нужен тот
+// лимит, который упирается первым в обычной работе, — пятичасовой; если у
+// тарифа его нет (Codex plus), то недельный.
+//
+// windows отсортированы по длительности, затем по ключу, поэтому первое
+// совпадение по длительности — самое общее окно, а не привязанное к модели.
+function panelWindow(windows) {
+    if (!windows.length)
+        return null;
+    return windows.find(w => w.duration_mins === FIVE_HOUR_MINS)
+        ?? windows.find(w => w.duration_mins === WEEKLY_MINS)
+        ?? windows[0];
 }
 
 function effectiveRemaining(window) {
