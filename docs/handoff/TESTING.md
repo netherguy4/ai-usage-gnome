@@ -4,14 +4,50 @@
 
 ## Текущее тестовое доказательство
 
-На момент handoff локально выполнены только проверки, не требующие Rust toolchain или настоящей GNOME session:
-
-```bash
-bash -n install.sh uninstall.sh install-online.sh scripts/package.sh
-node --check extension/ai-usage@netherguy4/extension.js
+```text
+Дата:        27 июля 2026
+Commit:      ветка main, после «Add provider fixtures, tests, account CLI and last-known-good state»
+Среда:       Bluefin 44.20260721 (Silverblue), GNOME Shell 50.3, Wayland,
+             Rust 1.97.1, codex-cli 0.145.0, claude 2.1.220
 ```
 
-Также подтверждены parsing конфигурационных файлов, packaging smoke и rootless install/uninstall smoke в изолированных XDG каталогах. Rust toolchain в исходной среде отсутствовал.
+### Пройдено
+
+**Сборка и статические гейты**
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --locked      # 85 тестов
+cargo build --release --locked
+bash -n install.sh uninstall.sh install-online.sh scripts/package.sh
+gjs -m extension/ai-usage@netherguy4/extension.js   # разбор модуля
+```
+
+**Codex — X1, живой аккаунт.** `ai-usage once` вернул `status=ok`, `plan=plus`, email и недельное окно (46% остатка, reset через 5 д). Подтверждено, что последовательность `initialize → initialized → account/read → account/rateLimits/read` принимается app-server 0.145 одним батчем, а ответы приходят в виде `result.rateLimitsByLimitId.codex.primary.{usedPercent,windowDurationMins,resetsAt}`.
+
+**Codex — X2, два профиля.** `~/.codex` (авторизован) и `~/.codex-aiusage-x2` (пустой) в одном конфиге: email/plan/лимиты не смешиваются, второй профиль отдаёт `unauthenticated` с командой входа, ошибка одного не скрывает данные другого.
+
+**Codex — X3, ошибки.** Отсутствующая команда, неавторизованный профиль и несуществующий `CODEX_HOME` дают разные внятные сообщения. Последний случай раньше давал только «Codex не вернул account/read»; теперь в ошибку попадает exit status и redacted-хвост stderr с настоящей причиной.
+
+**Claude — C1.** Hook установлен в реальный `~/.claude`, `doctor` его видит, payload реального формата даёт `[Opus 5 (1M context)] · 5h 63% left · 7d 38% left`, кеш пишется, `once` отдаёт model и оба окна. Схема payload сверена с документацией, встроенной в бинарь `claude` 2.1.220.
+
+**Claude — C2, восстановление.** Шесть сценариев покрыты автотестами (`src/setup.rs`), плюс живая проверка: после `ai-usage-uninstall --keep-config` файл `~/.claude/settings.json` вернулся к исходному содержимому байт в байт, backup удалён.
+
+**Установка и удаление.** `./install.sh --no-setup` на реальной системе: раскладка файлов, `secrets.env` с правами 600, user-service `enabled` + `active`. `ai-usage-uninstall --keep-config` убрал бинарь, расширение, unit и кеш, сохранив конфиг; повторный install подхватил сохранённый конфиг. Установка в путь `"/tmp/.../ai usage & tools/bin"` даёт корректный `ExecStart="..."`, `systemd-analyze verify` не жалуется, бинарь запускается.
+
+**Online installer.** Логика сверки `SHA256SUMS` проверена на трёх случаях: целый архив принимается, изменённый на один байт отклоняется, отсутствие записи для архива отклоняется.
+
+**Логика UI.** Чистые функции `extension.js` прогнаны под `gjs` на настоящем `state.json`: метка панели для ok/stale/error, форматирование возраста данных (включая часы, ушедшие вперёд, и нечисловой ввод), окна, деньги и статусы.
+
+**last-known-good.** После удачного refresh провайдер намеренно сломан: аккаунт перешёл в `stale`, сохранив квоту, plan и прежний `updated_at`, и показал текст ошибки.
+
+### Не пройдено — требует действия пользователя
+
+- **Рендеринг расширения в GNOME Shell.** На Wayland Shell не пересканирует каталог расширений без перезапуска сессии: `gnome-extensions enable ai-usage@netherguy4` пока отвечает «расширение не найдено». Нужен выход из сессии и вход, затем enable и проверка пунктов из раздела «P0: GNOME/Bluefin integration» ниже.
+- **Автозапуск после reboot.** Unit `enabled` и `active`, но фактический цикл reboot → login не выполнялся.
+- **DeepSeek на живом ключе.** Ключа в среде нет; провайдер покрыт только mock-HTTP тестами.
+- **aarch64 release artifact** и online installer против настоящего GitHub Release.
 
 ## P0: компиляция и базовое качество
 

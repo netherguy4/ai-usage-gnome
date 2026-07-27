@@ -6,35 +6,32 @@ Roadmap описывает направление, а не обещанные с
 
 ## P0 — довести существующий MVP до проверяемого релиза
 
-- Скомпилировать и исправить Rust project.
-- Добавить `Cargo.lock`.
-- Усилить CI format/clippy gates.
-- Проверить Codex handshake и response schema на живых аккаунтах.
-- Добавить provider timeouts и безопасную диагностику.
-- Протестировать Claude hook/restore.
-- Протестировать extension на целевой Bluefin/GNOME.
-- Добавить checksum verification online installer.
+Сделано: сборка и `Cargo.lock`, реальные CI format/clippy/MSRV gates, живая проверка Codex handshake и response schema, provider timeouts и безопасная диагностика, Claude hook/restore, checksum verification в online installer.
+
+Осталось:
+
+- Протестировать extension на целевой Bluefin/GNOME после перезахода в сессию.
 - Выпустить и проверить `v0.1.0-rc.1`.
 - После успешной матрицы выпустить `v0.1.0`.
 
 ## P1 — сделать ежедневное использование удобным
 
-- CLI управления аккаунтами: list, add, update, remove, rename.
-- Non-interactive setup flags для автоматизации.
-- Настройка refresh/stale thresholds через CLI.
-- Last-known-good cache с явным отображением возраста.
+Сделано: CLI управления аккаунтами (list/add/remove/rename) с неинтерактивными флагами, настройка refresh/stale через CLI, last-known-good cache с отображением возраста, отдельные состояния provider-unavailable и stale-with-data.
+
+Осталось:
+
 - Более информативный panel summary без перегрузки панели.
 - Цветовые/иконные warning states с учётом GNOME accessibility.
-- Отдельный status для provider unavailable и stale-data-with-error.
 - Safe diagnostics command с redacted provider details.
 - Upgrade command или чёткий in-place upgrade flow.
 
 ## P1 — тестируемость и надёжность
 
-- Fixture tests для Claude/Codex payloads.
-- Mock HTTP tests DeepSeek.
-- Integration test subprocess JSONL protocol.
-- Tests config migration и uninstall restore.
+Сделано: fixture tests для Claude/Codex payloads, mock HTTP tests DeepSeek, tests uninstall restore и валидации конфига.
+
+Осталось:
+
+- Integration test subprocess JSONL protocol (сейчас покрыт разбор строк, но не запуск процесса).
 - CI packaging/install smoke с настоящим binary.
 - Проверка release asset на arm64.
 

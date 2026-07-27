@@ -14,8 +14,9 @@ Runtime:
 
 Сборка из source:
 
-- Rust stable, заявленный минимум в Cargo manifest — 1.80;
+- Rust stable, заявленный минимум в Cargo manifest — 1.86. Это диктуется графом зависимостей (`icu_*` 2.2 через `url` → `reqwest`), а не самим кодом; CI проверяет сборку на этой версии отдельным job;
 - standard C linker;
+- `python3` нужен `install.sh` для подстановки путей в systemd unit и `install-online.sh` для разбора GitHub API;
 - Node используется только в CI для syntax check;
 - `zip`, `tar` нужны packaging workflow.
 
@@ -43,7 +44,7 @@ cd ai-usage-gnome-<version>-<arch>
 curl -fsSL https://raw.githubusercontent.com/netherguy4/ai-usage-gnome/main/install-online.sh | bash
 ```
 
-Online path не должен рекламироваться как безопасный production path, пока installer не сверяет `SHA256SUMS`.
+Installer скачивает `SHA256SUMS` из того же релиза и сверяет контрольную сумму архива до распаковки. Отсутствие записи для архива или расхождение суммы прерывают установку. Это проверено на целом, изменённом и отсутствующем в списке архиве, но ещё не на настоящем GitHub Release.
 
 ## Что делает install
 
@@ -60,11 +61,26 @@ Online path не должен рекламироваться как безопа
 
 ## Настройка
 
+Интерактивно:
+
 ```bash
 ai-usage setup
 ```
 
-Setup поддерживает add/update по ID. Remove пока выполняется ручным редактированием config, после чего нужен restart service.
+Неинтерактивно:
+
+```bash
+ai-usage account list
+ai-usage account add codex --id codex-work --name "Codex Work" --codex-home ~/.codex-work
+ai-usage account add claude --id claude-main --config-dir ~/.claude --plan Max
+printf '%s' "$KEY" | ai-usage account add deepseek --id ds --api-key-stdin
+ai-usage account rename codex-work "Codex рабочий"
+ai-usage account remove codex-work
+ai-usage config show
+ai-usage config set --refresh-seconds 60 --stale-seconds 43200
+```
+
+Удаление Claude-аккаунта восстанавливает его `statusLine`; `--keep-hook` оставляет hook на месте. Конфиг отклоняет дублирующиеся ID и два аккаунта одного провайдера с общим каталогом.
 
 Проверки:
 
@@ -137,7 +153,7 @@ CODEX_HOME="$HOME/.codex-profile" codex login
 CODEX_HOME="$HOME/.codex-profile" codex app-server
 ```
 
-Текущая версия скрывает stderr app-server; для глубокой диагностики может потребоваться временный debug build с redaction.
+Текст ошибки уже содержит exit status app-server и redacted-хвост его stderr, поэтому типичные причины (нет каталога, нет входа, не та команда) видны сразу из `ai-usage once`.
 
 ### Claude waiting/stale
 
@@ -149,17 +165,20 @@ CODEX_HOME="$HOME/.codex-profile" codex app-server
 
 ## CI
 
-`ci.yml` должен проверять:
+`ci.yml` проверяет:
 
 ```bash
 cargo fmt --all -- --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --locked
+cargo build --release --locked
 node --check extension/ai-usage@netherguy4/extension.js
-shellcheck ...
+shellcheck install.sh uninstall.sh install-online.sh scripts/package.sh
 ```
 
-На момент handoff format и clippy steps слабее этого целевого режима; см. [`STATUS.md`](STATUS.md).
+Отдельный job `msrv` читает `rust-version` из `Cargo.toml` и выполняет `cargo check --locked` на этой версии, чтобы заявленный минимум не расходился с реальным графом зависимостей.
+
+Раньше format step выполнял `cargo fmt --all` без `--check` — то есть переписывал исходники вместо проверки и не мог упасть; clippy запускался без `-D warnings`. Оба гейта были декоративными.
 
 ## Release
 

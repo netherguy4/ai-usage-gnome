@@ -42,7 +42,7 @@ gnome-extensions enable ai-usage@netherguy4
 
 ### Установка из исходников
 
-Нужен Rust toolchain:
+Нужен Rust 1.86 или новее:
 
 ```bash
 git clone https://github.com/netherguy4/ai-usage-gnome.git
@@ -54,13 +54,33 @@ cd ai-usage-gnome
 
 ## Настройка
 
-В любой момент:
+Интерактивный мастер:
 
 ```bash
 ai-usage setup
 ```
 
-Мастер умеет добавлять или обновлять Claude, Codex и DeepSeek. Повторный ID заменяет существующую запись, поэтому вручную TOML обычно редактировать не нужно.
+Он умеет добавлять или обновлять Claude, Codex и DeepSeek. Повторный ID заменяет существующую запись.
+
+Те же действия без диалога — например, для скриптов и dotfiles:
+
+```bash
+ai-usage account list
+ai-usage account add codex  --id codex-work --name "Codex Work" --codex-home ~/.codex-work
+ai-usage account add claude --id claude-main --config-dir ~/.claude --plan Max
+printf '%s' "$DEEPSEEK_KEY" | ai-usage account add deepseek --id ds --api-key-stdin
+ai-usage account rename codex-work "Codex рабочий"
+ai-usage account remove codex-work
+```
+
+Удаление Claude-аккаунта возвращает прежний `statusLine`. Два аккаунта одного провайдера с общим каталогом отклоняются: они дрались бы за один профиль.
+
+Частота обновления и порог устаревания:
+
+```bash
+ai-usage config show
+ai-usage config set --refresh-seconds 60 --stale-seconds 43200
+```
 
 Проверка установки:
 
@@ -115,6 +135,8 @@ account/rateLimits/read
 
 Из ответа выбирается bucket `codex` (настраивается полем `limit_id`) и окна, ближайшие к 5 часам и 7 дням.
 
+**Что показывается на разных планах.** Codex возвращает столько окон, сколько есть у тарифа. На `plus`, например, приходит только недельное окно — тогда строки «5 часов» в меню не будет. Это ответ провайдера, а не потеря данных.
+
 ### DeepSeek
 
 API-ключ сохраняется в:
@@ -163,11 +185,17 @@ ai-usage-uninstall --keep-config
 ai-usage daemon                фоновый цикл обновления
 ai-usage once                  одно обновление + JSON в stdout
 ai-usage setup                 интерактивный мастер
+ai-usage account list|add|remove|rename    управление аккаунтами
+ai-usage config show|set       частота обновления и порог устаревания
 ai-usage doctor                диагностика
 ai-usage init                  создать пустой config.toml
 ai-usage claude-hook ...       внутренний Claude status-line hook
 ai-usage restore-claude-hooks  восстановить Claude settings.json
 ```
+
+## Что происходит при сбое провайдера
+
+Разовая ошибка не стирает цифры: аккаунт помечается как устаревший, сохраняет последние удачные данные и показывает их возраст вместе с текстом ошибки. Провайдер, у которого данных не было вовсе, показывается отдельно — как недоступный. Сбой одного аккаунта не влияет на остальные: у каждого свой 30-секундный дедлайн.
 
 ## GitHub Actions
 

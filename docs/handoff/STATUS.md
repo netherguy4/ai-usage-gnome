@@ -1,7 +1,7 @@
 # Инженерный статус
 
 > Родительский индекс: [`HANDOFF.md`](../../HANDOFF.md)  
-> Снимок состояния: **26 июля 2026 года**.
+> Снимок состояния: **27 июля 2026 года**.
 
 ## Легенда
 
@@ -67,29 +67,39 @@
 - Release workflow для `x86_64` и `aarch64`.
 - Packaging script и release checksums.
 
+### CLI управления
+
+- `ai-usage account list/add/remove/rename` с неинтерактивными флагами.
+- `ai-usage config show/set` для `refresh_seconds` и `stale_seconds`.
+- Валидация уникальности ID и монопольности Claude/Codex каталогов.
+- Удаление Claude-аккаунта восстанавливает его `statusLine`.
+
+### Надёжность
+
+- Таймауты HTTP DeepSeek (15 с запрос, 5 с соединение) и общий 30-секундный дедлайн на каждый provider fetch.
+- Bounded redacted stderr Codex в тексте ошибки.
+- last-known-good: при разовом сбое провайдера квота сохраняется, аккаунт помечается `stale` с настоящим возрастом данных.
+
 ## Что фактически проверено
 
-- `bash -n`: install, uninstall, online install, package scripts.
-- `node --check`: `extension.js`.
-- Парсинг metadata JSON, Cargo/config TOML и workflow YAML.
-- Packaging smoke test.
-- Rootless install/uninstall smoke в изолированных HOME/XDG каталогах с тестовым binary.
+Полные условия, команды и результаты — в [`TESTING.md`](TESTING.md). Кратко, на Bluefin 44.20260721 / GNOME Shell 50.3 / Rust 1.97.1 / codex-cli 0.145.0 / claude 2.1.220:
 
-Ограничение доказательства: тестовый install smoke подтверждает раскладку файлов и обратимость скриптов, но не работу настоящего Rust binary, user systemd session или GNOME Shell.
+- `cargo fmt --check`, `clippy -D warnings`, `cargo test` (85 тестов), release build — все зелёные.
+- Живой Codex handshake и схема ответа; план `plus` отдаёт одно недельное окно.
+- Два независимых `CODEX_HOME` в одном конфиге.
+- Ошибки Codex: нет команды, не авторизован, несуществующий `CODEX_HOME`.
+- Реальный Claude status-line hook, кеш и оба окна; схема payload сверена с бинарём `claude` 2.1.220.
+- Rootless install/uninstall/reinstall на настоящей системе, включая путь с пробелом и `&`.
+- Восстановление `~/.claude/settings.json` байт в байт после удаления.
+- Проверка `SHA256SUMS` в online installer на целом, изменённом и отсутствующем в списке архиве.
+- Логика UI расширения под `gjs` на настоящем `state.json`.
+- last-known-good при намеренно сломанном провайдере.
 
 ## Что обязательно требует тестирования
 
-- Любая компиляция Rust и корректность зависимостей на Rust 1.80/stable.
-- `cargo test`, `clippy`, release build.
-- Живой Codex App Server handshake и актуальная JSON schema.
-- Правильность bucket `codex` для разных планов Codex.
-- Два одновременно настроенных Codex аккаунта.
-- Реальный Claude statusLine payload с `rate_limits`.
-- Backup/restore Claude settings на существующем сложном JSON.
-- Реальный DeepSeek key, currency entries, depleted/HTTP errors.
-- GNOME runtime: enable/disable, file monitor, popup rendering, logout/login.
-- Совместимость с фактической GNOME версией Bluefin.
-- systemd user-service после reboot/login.
+- **Рендеринг расширения в GNOME Shell.** На Wayland требуется перезаход в сессию, чтобы Shell увидел новое расширение; до этого `gnome-extensions enable` не работает. Не проверены: popup при разных наборах аккаунтов, file monitor, кнопка обновления, многократные enable/disable, длинные строки.
+- systemd user-service после настоящего reboot/login.
+- Реальный DeepSeek key: currency entries, depleted, 401/403.
 - Release workflow, aarch64 cross-build и установка release archive.
 - Online installer на настоящем GitHub Release.
 
@@ -97,35 +107,21 @@
 
 ### P0 — релизные блокеры
 
-- Добавить `Cargo.lock` для воспроизводимой сборки приложения.
-- Изменить CI format step на `cargo fmt --all -- --check`.
-- Запускать Clippy с `-- -D warnings`.
-- Подтвердить или исправить последовательность Codex initialize handshake.
-- Добавить явный HTTP timeout для DeepSeek и общий дедлайн provider refresh.
-- Не отбрасывать всю диагностику Codex: добавить безопасный bounded stderr capture/redaction.
-- Проверить checksum в `install-online.sh`, а не только публиковать `SHA256SUMS`.
-- Зафиксировать поддержанные GNOME версии после runtime tests; убрать неподтверждённые из metadata.
+Все закрыты в коде; остались только проверки из раздела выше.
 
 ### P1 — важная эксплуатационная доработка
 
-- Добавить `ai-usage account list/remove` или эквивалентное управление без ручного TOML.
-- Валидировать уникальность ID и уникальность Claude/Codex directories.
-- Добавить provider fixtures/mocks и тесты parsing/error states.
-- Сделать stale threshold и refresh interval управляемыми через setup.
-- Сохранять last-good state при временном provider error вместо полного исчезновения quota data.
-- Показать в UI возраст данных каждого аккаунта.
 - Добавить upgrade flow и документировать совместимость config/state schema.
-- Проверить quoting путей с пробелами в systemd template/install scripts.
+- Показать в UI возраст данных для аккаунтов без квоты (сейчас возраст выводится только когда данные есть).
 
 ## Что не готово
 
-- Production-ready статус.
+- Production-ready статус: код и локальная приёмка готовы, но расширение ни разу не отрисовывалось в GNOME Shell и релиз не публиковался.
 - Опубликованный и проверенный GitHub Release.
 - Подтверждённая установка одной командой из release.
 - Полная автоматическая детекция Claude plan.
 - GUI Preferences для GNOME extension.
 - Безопасное хранение DeepSeek key в Secret Service/keyring.
-- Полноценные integration/e2e tests.
 - Локализация UI.
 - Документированная политика обновления/миграций.
 
@@ -134,10 +130,10 @@
 - Claude quota cache зависит от фактического запуска Claude Code и ответа модели.
 - Claude plan ручной и может быть неверным.
 - Неправильный/изменившийся Codex JSON-RPC schema даст error state всем Codex profiles.
+- На плане Codex `plus` возвращается только недельное окно — строки «5 часов» в UI не будет. Это поведение провайдера, а не дефект.
 - Все Codex app-server процессы запускаются параллельно на каждом refresh; при большом числе аккаунтов это может быть тяжело.
-- DeepSeek request без timeout может остановить завершение всего refresh cycle.
 - Повреждённый `config.toml` завершает daemon; systemd будет пытаться его перезапускать.
-- Два Claude account entries с одним config dir могут испортить ожидаемое восстановление hook.
-- `secrets.env` — plaintext, хотя права ограничены пользователем.
-- Online installer доверяет TLS/GitHub asset и пока не сверяет опубликованный checksum.
-- Metadata GNOME 45–50 не подтверждена реальными тестами.
+- `secrets.env` — plaintext, хотя права ограничены пользователем (0600 с момента создания).
+- Redaction диагностики Codex эвристическая: она рассчитана на известные формы токенов и не является гарантией.
+- Metadata заявляет GNOME 48–50; реально проверена только 50.3.
+- MSRV 1.86 продиктован графом зависимостей (`icu_*` через `url` → `reqwest`), а не самим кодом.
