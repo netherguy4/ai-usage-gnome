@@ -39,17 +39,6 @@ pub fn state_file() -> PathBuf {
     runtime_dir().join("state.json")
 }
 
-pub fn data_dir() -> Result<PathBuf> {
-    let base = dirs::data_local_dir().context("Не удалось определить каталог данных")?;
-    Ok(base.join("ai-usage"))
-}
-
-pub fn claude_cache_file(account_id: &str) -> Result<PathBuf> {
-    Ok(data_dir()?
-        .join("claude")
-        .join(format!("{account_id}.json")))
-}
-
 pub fn secrets_file() -> Result<PathBuf> {
     let base = dirs::config_dir().context("Не удалось определить каталог конфигурации")?;
     Ok(base.join("ai-usage").join("secrets.env"))
@@ -350,13 +339,5 @@ mod tests {
     #[test]
     fn does_not_resolve_a_directory_as_a_command() {
         assert!(resolve_command("/usr/bin").is_none());
-    }
-
-    #[test]
-    fn cache_path_is_scoped_per_account() {
-        let one = claude_cache_file("claude-main").unwrap();
-        let two = claude_cache_file("claude-work").unwrap();
-        assert_ne!(one, two);
-        assert!(one.ends_with("claude/claude-main.json"));
     }
 }

@@ -62,7 +62,12 @@ fn add_claude(config: &mut Config) -> Result<()> {
     };
     let config_dir = PathBuf::from(prompt("CLAUDE_CONFIG_DIR", Some(&default_dir))?);
 
-    install_claude_status_line(&id, &config_dir)?;
+    // Виджету hook не нужен: лимиты берутся напрямую у Anthropic. Ставим его
+    // только если пользователь хочет видеть их и внутри Claude Code.
+    let with_hook = yes_no("Показывать лимиты и в самом Claude Code?", false)?;
+    if with_hook {
+        install_claude_status_line(&id, &config_dir)?;
+    }
     config::upsert_account(
         config,
         AccountConfig::Claude {
@@ -74,7 +79,9 @@ fn add_claude(config: &mut Config) -> Result<()> {
     );
     config::save(config)?;
 
-    println!("Claude hook установлен.");
+    if with_hook {
+        println!("Claude hook установлен.");
+    }
     if config_dir.as_os_str() != "~/.claude" {
         println!(
             "Запуск этого профиля: CLAUDE_CONFIG_DIR={} claude",
@@ -161,16 +168,6 @@ fn add_deepseek(config: &mut Config) -> Result<()> {
     config::save(config)?;
     println!("Ключ сохранён в secrets.env с правами 600.");
     Ok(())
-}
-
-/// Установлен ли наш hook в `settings.json` этого профиля.
-pub fn is_hook_installed(account_id: &str, config_dir: &Path) -> bool {
-    let settings_path = crate::util::expand_home(config_dir).join("settings.json");
-    fs::read_to_string(&settings_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .map(|settings| is_our_hook(&settings, account_id))
-        .unwrap_or(false)
 }
 
 pub fn install_claude_status_line(account_id: &str, config_dir: &Path) -> Result<()> {

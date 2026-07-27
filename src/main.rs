@@ -9,11 +9,10 @@ use std::io::Read;
 use std::process::Command as StdCommand;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use config::AccountConfig;
 use model::AppState;
-use providers::claude::ClaudeInput;
 use std::path::PathBuf;
 use tokio::task::JoinSet;
 
@@ -83,9 +82,10 @@ enum AddCommand {
         config_dir: PathBuf,
         #[arg(long)]
         plan: Option<String>,
-        /// Do not touch settings.json; install the hook later with `setup`.
+        /// Also show the limits inside Claude Code itself. Modifies
+        /// settings.json; the widget does not need it.
         #[arg(long)]
-        no_hook: bool,
+        hook: bool,
     },
     /// Codex profile backed by its own CODEX_HOME.
     Codex {
@@ -269,7 +269,7 @@ fn build_account(command: AddCommand) -> Result<Added> {
             common,
             config_dir,
             plan,
-            no_hook,
+            hook,
         } => {
             util::validate_id(&common.id)?;
             Ok(Added {
@@ -279,7 +279,7 @@ fn build_account(command: AddCommand) -> Result<Added> {
                     config_dir,
                     plan,
                 },
-                install_hook: !no_hook,
+                install_hook: hook,
             })
         }
         AddCommand::Codex {
@@ -475,18 +475,13 @@ fn write_state(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Необязательный hook: показывает лимиты внутри самого Claude Code.
+/// Виджет от него не зависит — он опрашивает Anthropic напрямую.
 fn claude_hook(account: &str) -> Result<()> {
     util::validate_id(account)?;
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
-    let input: ClaudeInput =
-        serde_json::from_str(&raw).context("Claude hook получил некорректный JSON")?;
-
-    let cache = input.into_cache(util::unix_now());
-    let path = util::claude_cache_file(account)?;
-    util::atomic_write(&path, serde_json::to_string_pretty(&cache)?.as_bytes())?;
-
-    println!("{}", cache.status_line());
+    println!("{}", providers::claude::status_line_from_payload(&raw)?);
     Ok(())
 }
 
@@ -513,13 +508,9 @@ fn doctor() -> Result<()> {
                 config_dir,
                 ..
             } => {
-                let settings = util::expand_home(config_dir).join("settings.json");
-                println!(
-                    "{} Claude '{}': hook {}",
-                    mark(setup::is_hook_installed(id, config_dir)),
-                    name,
-                    settings.display()
-                );
+                let _ = id;
+                let (ok, detail) = providers::claude::credentials_status(config_dir);
+                println!("{} Claude '{}': {}", mark(ok), name, detail);
             }
             config::AccountConfig::Codex {
                 name,

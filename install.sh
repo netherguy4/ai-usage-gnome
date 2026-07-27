@@ -60,6 +60,8 @@ fi
 mkdir -p "$BIN_DIR" "$EXT_DIR" "$CONFIG_DIR" "$SYSTEMD_DIR"
 install -m 0755 "$SOURCE_BINARY" "$BINARY"
 install -m 0755 "$ROOT/uninstall.sh" "$BIN_DIR/ai-usage-uninstall"
+EXT_EXISTED=0
+[[ -d "$EXT_DIR" ]] && EXT_EXISTED=1
 rm -rf "$EXT_DIR"
 mkdir -p "$EXT_DIR"
 cp -a "$ROOT/extension/$UUID/." "$EXT_DIR/"
@@ -95,6 +97,11 @@ if command -v gnome-extensions >/dev/null 2>&1; then
   if ! gnome-extensions enable "$UUID" 2>/dev/null; then
     echo "GNOME Shell has not loaded the new extension yet. Log out and log back in, then run:"
     echo "  gnome-extensions enable $UUID"
+  elif [[ "$EXT_EXISTED" -eq 1 ]]; then
+    # На Wayland Shell нельзя перезапустить, а перезагрузить JS уже загруженного
+    # расширения он не умеет: ReloadExtension объявлен, но не реализован.
+    echo "Extension files were replaced. GNOME Shell keeps running the previously"
+    echo "loaded copy until you log out and log back in."
   fi
 else
   echo "Warning: gnome-extensions not found. Enable '$UUID' in Extension Manager." >&2

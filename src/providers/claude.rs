@@ -1,8 +1,10 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::model::{label_for_duration, AccountState, QuotaWindow, FIVE_HOUR_MINS, WEEKLY_MINS};
@@ -10,110 +12,119 @@ use crate::model::{label_for_duration, AccountState, QuotaWindow, FIVE_HOUR_MINS
 /// Пока порог не задан в конфиге, данные Claude считаются устаревшими через сутки.
 pub const DEFAULT_STALE_SECONDS: i64 = 86_400;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ClaudeCache {
-    pub updated_at: i64,
-    pub model: Option<String>,
-    #[serde(default)]
-    pub windows: Vec<QuotaWindow>,
+/// Официальный endpoint, который опрашивает сам Claude Code.
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(5))
+            .user_agent(concat!("ai-usage/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("не удалось создать HTTP-клиент")
+    })
 }
 
-/// Payload, который Claude Code передаёт status-line команде в stdin.
+// ── Разбор ответа об использовании ──────────────────────────────────────────
+
+/// Одна запись из `limits[]`.
 ///
-/// `rate_limits` разбирается как открытая карта, а не как набор известных
-/// полей: помимо документированных `five_hour` и `seven_day` Claude Code
-/// оперирует `seven_day_opus`, `seven_day_sonnet`,
-/// `seven_day_overage_included` и лимитами конкретных моделей, которые
-/// появляются и исчезают вместе с тарифной политикой. Захардкоженный список
-/// молча терял бы новые лимиты.
+/// Массив `limits` — надмножество верхнеуровневых полей: только в нём
+/// приходят лимиты, привязанные к модели (`weekly_scoped` + `scope.model`).
 #[derive(Debug, Deserialize)]
-pub struct ClaudeInput {
-    model: Option<ClaudeModel>,
-    rate_limits: Option<serde_json::Map<String, Value>>,
+struct LimitEntry {
+    kind: String,
+    percent: Option<f64>,
+    resets_at: Option<String>,
+    #[serde(default)]
+    scope: Option<LimitScope>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ClaudeModel {
+struct LimitScope {
+    #[serde(default)]
+    model: Option<ScopedModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScopedModel {
     display_name: Option<String>,
 }
 
-impl ClaudeInput {
-    /// Превращает payload в кеш. Чистая функция — тестируется на фикстуре.
-    pub fn into_cache(self, now: i64) -> ClaudeCache {
-        ClaudeCache {
-            updated_at: now,
-            model: self.model.and_then(|model| model.display_name),
-            windows: self.rate_limits.map(parse_windows).unwrap_or_default(),
-        }
-    }
+#[derive(Debug, Deserialize)]
+struct UsageResponse {
+    #[serde(default)]
+    limits: Vec<LimitEntry>,
 }
 
-/// Разбирает карту лимитов в упорядоченный список окон.
-fn parse_windows(limits: serde_json::Map<String, Value>) -> Vec<QuotaWindow> {
-    let mut windows: Vec<QuotaWindow> = limits
+/// Превращает ответ endpoint в список окон.
+///
+/// Набор лимитов задаётся сервером и меняется вместе с тарифной политикой:
+/// недельный лимит на конкретную модель может появиться и исчезнуть. Поэтому
+/// ничего не фильтруем по белому списку — показываем всё, что пришло.
+pub fn windows_from_usage(raw: &str) -> Result<Vec<QuotaWindow>> {
+    let response: UsageResponse =
+        serde_json::from_str(raw).context("Claude вернул некорректный JSON")?;
+
+    let mut windows: Vec<QuotaWindow> = response
+        .limits
         .into_iter()
-        .filter_map(|(key, value)| {
-            let used = value.get("used_percentage")?.as_f64()?;
-            let resets_at = value.get("resets_at").and_then(Value::as_i64);
-            let duration = duration_for_key(&key);
+        .filter_map(|entry| {
+            let percent = entry.percent?;
+            let model = entry
+                .scope
+                .and_then(|scope| scope.model)
+                .and_then(|model| model.display_name);
+            let duration = duration_for_kind(&entry.kind);
+            let key = match &model {
+                Some(model) => format!("{}:{}", entry.kind, model.to_lowercase()),
+                None => entry.kind.clone(),
+            };
             Some(QuotaWindow::new(
-                &key,
-                label_for_key(&key, duration),
-                used,
+                key,
+                label_for_kind(&entry.kind, model.as_deref(), duration),
+                percent,
                 duration,
-                resets_at,
+                entry.resets_at.as_deref().and_then(rfc3339_to_unix),
             ))
         })
         .collect();
 
-    // Короткие окна выше длинных, внутри одной длительности — по имени ключа,
-    // иначе порядок скакал бы от обновления к обновлению (карта не упорядочена).
-    // Общий лимит оказывается перед уточнёнными сам: 'seven_day' — префикс
-    // 'seven_day_opus' и потому сортируется раньше.
     windows.sort_by(|a, b| {
         a.duration_mins
             .unwrap_or(u64::MAX)
             .cmp(&b.duration_mins.unwrap_or(u64::MAX))
             .then_with(|| a.key.cmp(&b.key))
     });
-    windows
+    Ok(windows)
 }
 
-fn duration_for_key(key: &str) -> Option<u64> {
-    if key.starts_with("five_hour") {
-        Some(FIVE_HOUR_MINS)
-    } else if key.starts_with("seven_day") {
-        Some(WEEKLY_MINS)
-    } else {
-        None
+fn duration_for_kind(kind: &str) -> Option<u64> {
+    match kind {
+        "session" => Some(FIVE_HOUR_MINS),
+        kind if kind.starts_with("weekly") => Some(WEEKLY_MINS),
+        _ => None,
     }
 }
 
-/// Подпись лимита. Известные ключи получают осмысленное имя, незнакомые —
-/// собираются из базового окна и суффикса, чтобы новый лимит появился в
-/// интерфейсе сам, без правки кода.
-fn label_for_key(key: &str, duration: Option<u64>) -> String {
-    match key {
-        "five_hour" => return "5 часов".to_owned(),
-        "seven_day" => return "Неделя".to_owned(),
-        "seven_day_overage_included" => return "Неделя · с превышением".to_owned(),
-        _ => {}
-    }
-
-    let base = label_for_duration(duration);
-    let suffix = key
-        .strip_prefix("seven_day_")
-        .or_else(|| key.strip_prefix("five_hour_"));
-
-    match suffix {
-        Some(suffix) if !suffix.is_empty() => format!("{base} · {}", humanize(suffix)),
-        _ if duration.is_some() => base,
-        _ => humanize(key),
+fn label_for_kind(kind: &str, model: Option<&str>, duration: Option<u64>) -> String {
+    let base = match kind {
+        "session" => "5 часов".to_owned(),
+        "weekly_all" => "Неделя".to_owned(),
+        _ if duration.is_some() => label_for_duration(duration),
+        kind => humanize(kind),
+    };
+    match model {
+        Some(model) => format!("{base} · {model}"),
+        None => base,
     }
 }
 
 fn humanize(raw: &str) -> String {
-    raw.split('_')
+    raw.split(['_', '-'])
         .filter(|part| !part.is_empty())
         .map(|part| {
             let mut chars = part.chars();
@@ -126,114 +137,125 @@ fn humanize(raw: &str) -> String {
         .join(" ")
 }
 
-impl ClaudeCache {
-    /// Строка, которую hook печатает обратно в Claude Code.
-    pub fn status_line(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(model) = &self.model {
-            parts.push(format!("[{model}]"));
-        }
-        for window in &self.windows {
-            parts.push(format!(
-                "{} {:.0}% left",
-                short_label(window),
-                window.remaining_percent
-            ));
-        }
-        parts.join(" · ")
+// ── Время ───────────────────────────────────────────────────────────────────
+
+/// Разбирает `2026-07-30T15:59:59.352117+00:00` в unix-секунды.
+///
+/// Своя реализация вместо зависимости от chrono: нужен ровно один формат,
+/// который отдаёт этот endpoint.
+fn rfc3339_to_unix(raw: &str) -> Option<i64> {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 19 || bytes[10] != b'T' {
+        return None;
     }
+    let number = |from: usize, to: usize| raw.get(from..to)?.parse::<i64>().ok();
+
+    let year = number(0, 4)?;
+    let month = number(5, 7)?;
+    let day = number(8, 10)?;
+    let hour = number(11, 13)?;
+    let minute = number(14, 16)?;
+    let second = number(17, 19)?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let mut stamp = days_from_civil(year, month as u32, day as u32) * 86_400
+        + hour * 3600
+        + minute * 60
+        + second;
+
+    // Смещение зоны: 'Z' либо ±HH:MM в хвосте.
+    let tail = &raw[19..];
+    if let Some(sign_at) = tail.rfind(['+', '-']) {
+        let offset = &tail[sign_at..];
+        if offset.len() >= 6 {
+            let hours: i64 = offset.get(1..3)?.parse().ok()?;
+            let minutes: i64 = offset.get(4..6)?.parse().ok()?;
+            let total = hours * 3600 + minutes * 60;
+            stamp += if offset.starts_with('-') {
+                total
+            } else {
+                -total
+            };
+        }
+    }
+    Some(stamp)
 }
 
-/// Компактная подпись для однострочного status line внутри Claude Code.
-fn short_label(window: &QuotaWindow) -> String {
-    let base = match window.duration_mins {
-        Some(FIVE_HOUR_MINS) => "5h".to_owned(),
-        Some(WEEKLY_MINS) => "7d".to_owned(),
-        _ => window.key.clone(),
-    };
-    match window
-        .key
-        .strip_prefix("seven_day_")
-        .or_else(|| window.key.strip_prefix("five_hour_"))
+/// Дни от 1970-01-01 (алгоритм Хиннанта).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(if month > 2 { month - 3 } else { month + 9 });
+    let day_of_year = (153 * month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Строка для status line внутри самого Claude Code.
+///
+/// Это необязательная косметика: виджет берёт лимиты напрямую у Anthropic и в
+/// hook не нуждается. Поэтому здесь ничего не кешируется — только форматируется
+/// то, что Claude Code уже прислал в stdin.
+pub fn status_line_from_payload(raw: &str) -> Result<String> {
+    let payload: Value =
+        serde_json::from_str(raw).context("Claude hook получил некорректный JSON")?;
+
+    let mut parts = Vec::new();
+    if let Some(model) = payload
+        .pointer("/model/display_name")
+        .and_then(Value::as_str)
     {
+        parts.push(format!("[{model}]"));
+    }
+
+    if let Some(limits) = payload.get("rate_limits").and_then(Value::as_object) {
+        let mut entries: Vec<_> = limits
+            .iter()
+            .filter_map(|(key, value)| {
+                let used = value.get("used_percentage")?.as_f64()?;
+                Some((key.clone(), 100.0 - used.clamp(0.0, 100.0)))
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (key, remaining) in entries {
+            parts.push(format!("{} {remaining:.0}% left", short_key(&key)));
+        }
+    }
+
+    Ok(parts.join(" · "))
+}
+
+fn short_key(key: &str) -> String {
+    let (base, suffix) = if let Some(rest) = key.strip_prefix("five_hour") {
+        ("5h", rest)
+    } else if let Some(rest) = key.strip_prefix("seven_day") {
+        ("7d", rest)
+    } else {
+        return key.to_owned();
+    };
+    match suffix.strip_prefix('_') {
         Some(suffix) if !suffix.is_empty() => format!("{base}/{suffix}"),
-        _ => base,
+        _ => base.to_owned(),
     }
 }
 
-pub async fn fetch(
-    id: &str,
-    name: &str,
-    plan: Option<String>,
-    config_dir: &Path,
-    stale_seconds: i64,
-) -> Result<AccountState> {
-    let identity = read_identity(config_dir);
-    let plan = plan.or(identity.plan);
+// ── Учётные данные и профиль ────────────────────────────────────────────────
 
-    let path = crate::util::claude_cache_file(id)?;
-    if !path.exists() {
-        return Ok(AccountState {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            provider: "claude".to_owned(),
-            status: "waiting".to_owned(),
-            plan,
-            email: identity.email,
-            model: None,
-            windows: Vec::new(),
-            balances: Vec::new(),
-            error: Some("Запусти Claude Code и отправь хотя бы один запрос".to_owned()),
-            updated_at: crate::util::unix_now(),
-        });
-    }
-
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("Не удалось прочитать кеш Claude {}", path.display()))?;
-    let cache: ClaudeCache = serde_json::from_str(&raw)
-        .with_context(|| format!("Повреждён кеш Claude {}", path.display()))?;
-
-    Ok(state_from_cache(
-        id,
-        name,
-        plan,
-        identity.email,
-        cache,
-        stale_seconds,
-        crate::util::unix_now(),
-    ))
+#[derive(Debug, Deserialize)]
+struct CredentialsFile {
+    #[serde(rename = "claudeAiOauth")]
+    oauth: Option<OauthCredentials>,
 }
 
-/// Чистая часть: кеш плюс текущее время дают `AccountState`.
-#[allow(clippy::too_many_arguments)]
-pub fn state_from_cache(
-    id: &str,
-    name: &str,
-    plan: Option<String>,
-    email: Option<String>,
-    cache: ClaudeCache,
-    stale_seconds: i64,
-    now: i64,
-) -> AccountState {
-    let age = now.saturating_sub(cache.updated_at);
-    let is_stale = age > stale_seconds;
-
-    AccountState {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        provider: "claude".to_owned(),
-        status: if is_stale { "stale" } else { "ok" }.to_owned(),
-        plan,
-        email,
-        model: cache.model,
-        windows: cache.windows,
-        balances: Vec::new(),
-        error: is_stale.then(|| {
-            let hours = age / 3600;
-            format!("Данные Claude обновлялись {hours} ч назад")
-        }),
-        updated_at: cache.updated_at,
-    }
+#[derive(Debug, Deserialize)]
+struct OauthCredentials {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+    #[serde(rename = "expiresAt")]
+    expires_at: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -244,10 +266,8 @@ pub struct Identity {
 
 /// Читает почту и тариф из конфига Claude Code.
 ///
-/// Ни то ни другое не приходит в status-line payload, поэтому берём из
-/// `.claude.json`, который пишет сам Claude Code. Файл лежит рядом с
-/// профилем; для профиля по умолчанию (`~/.claude`) он находится в домашнем
-/// каталоге. Токенов оттуда не читаем.
+/// Ни то ни другое не приходит с endpoint использования. Токены отсюда не
+/// берутся — только идентификация аккаунта.
 pub fn read_identity(config_dir: &Path) -> Identity {
     for path in identity_paths(config_dir) {
         let Ok(raw) = fs::read_to_string(&path) else {
@@ -273,7 +293,7 @@ pub fn read_identity(config_dir: &Path) -> Identity {
     Identity::default()
 }
 
-fn identity_paths(config_dir: &Path) -> Vec<std::path::PathBuf> {
+fn identity_paths(config_dir: &Path) -> Vec<PathBuf> {
     let dir = crate::util::expand_home(config_dir);
     let mut paths = vec![dir.join(".claude.json")];
     // Профиль по умолчанию: сам каталог ~/.claude, а .claude.json — рядом с ним.
@@ -285,144 +305,265 @@ fn identity_paths(config_dir: &Path) -> Vec<std::path::PathBuf> {
 
 /// `claude_max` → `Max`. Неизвестные значения показываем как есть.
 fn plan_label(raw: &str) -> String {
-    let trimmed = raw.strip_prefix("claude_").unwrap_or(raw);
-    humanize(trimmed)
+    humanize(raw.strip_prefix("claude_").unwrap_or(raw))
+}
+
+/// Кеш использования, который Claude Code сам сохраняет в `.claude.json`.
+/// Служит запасным источником, когда access token протух.
+fn cached_usage(config_dir: &Path) -> Option<(Vec<QuotaWindow>, i64)> {
+    for path in identity_paths(config_dir) {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(cached) = value.get("cachedUsageUtilization") else {
+            continue;
+        };
+        let fetched_at = cached.get("fetchedAtMs").and_then(Value::as_i64)? / 1000;
+        let utilization = cached.get("utilization")?;
+        let windows = windows_from_usage(&utilization.to_string()).ok()?;
+        if !windows.is_empty() {
+            return Some((windows, fetched_at));
+        }
+    }
+    None
+}
+
+fn read_token(config_dir: &Path) -> Option<OauthCredentials> {
+    let path = crate::util::expand_home(config_dir).join(".credentials.json");
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<CredentialsFile>(&raw).ok()?.oauth
+}
+
+/// Строка для `doctor`: есть ли рабочий доступ к лимитам.
+pub fn credentials_status(config_dir: &Path) -> (bool, String) {
+    let path = crate::util::expand_home(config_dir).join(".credentials.json");
+    let Some(credentials) = read_token(config_dir) else {
+        return (false, format!("нет входа, ожидался {}", path.display()));
+    };
+    match credentials.expires_at {
+        Some(expires_at) if expires_at / 1000 <= crate::util::unix_now() => (
+            false,
+            "токен истёк — запусти Claude Code, он обновит его сам".to_owned(),
+        ),
+        Some(expires_at) => {
+            let hours = (expires_at / 1000 - crate::util::unix_now()) / 3600;
+            (true, format!("вход есть, токен ещё {hours} ч"))
+        }
+        None => (true, "вход есть".to_owned()),
+    }
+}
+
+// ── Провайдер ───────────────────────────────────────────────────────────────
+
+pub async fn fetch(
+    id: &str,
+    name: &str,
+    plan: Option<String>,
+    config_dir: &Path,
+    stale_seconds: i64,
+) -> Result<AccountState> {
+    let _ = id;
+    let identity = read_identity(config_dir);
+    let plan = plan.or(identity.plan);
+    let now = crate::util::unix_now();
+
+    let state =
+        |status: &str, windows: Vec<QuotaWindow>, error: Option<String>, at: i64| AccountState {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            provider: "claude".to_owned(),
+            status: status.to_owned(),
+            plan: plan.clone(),
+            email: identity.email.clone(),
+            model: None,
+            windows,
+            balances: Vec::new(),
+            error,
+            updated_at: at,
+        };
+
+    match live_usage(config_dir, now).await {
+        Ok(windows) => Ok(state("ok", windows, None, now)),
+        Err(reason) => {
+            // Токен протух или сеть недоступна — показываем последнее, что
+            // сохранил сам Claude Code, честно указав возраст.
+            if let Some((windows, fetched_at)) = cached_usage(config_dir) {
+                let age = now.saturating_sub(fetched_at);
+                let status = if age > stale_seconds { "stale" } else { "ok" };
+                let error =
+                    (status == "stale").then(|| format!("{reason}; показан кеш Claude Code"));
+                return Ok(state(status, windows, error, fetched_at));
+            }
+            Ok(state("waiting", Vec::new(), Some(reason.to_string()), now))
+        }
+    }
+}
+
+/// Запрашивает актуальные лимиты у Anthropic. Ошибка означает «нужен запасной
+/// источник», а не отказ провайдера.
+async fn live_usage(config_dir: &Path, now: i64) -> Result<Vec<QuotaWindow>> {
+    let Some(credentials) = read_token(config_dir) else {
+        bail!("Выполни вход: claude");
+    };
+    if let Some(expires_at) = credentials.expires_at {
+        // expiresAt в миллисекундах; запас в минуту, чтобы не ловить гонку.
+        if expires_at / 1000 <= now + 60 {
+            bail!("Токен Claude истёк — запусти Claude Code, он обновит его сам");
+        }
+    }
+
+    let response = client()
+        .get(USAGE_URL)
+        .bearer_auth(&credentials.access_token)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header("anthropic-beta", OAUTH_BETA)
+        .send()
+        .await
+        .context("Не удалось связаться с Anthropic")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        // Тело не показываем: оно может содержать детали аккаунта.
+        bail!("Anthropic вернул HTTP {status}");
+    }
+
+    let body = response.text().await.context("Пустой ответ Anthropic")?;
+    let windows = windows_from_usage(&body)?;
+    if windows.is_empty() {
+        bail!("Anthropic не вернул ни одного лимита");
+    }
+    Ok(windows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const STATUSLINE: &str = include_str!("../../tests/fixtures/claude_statusline.json");
-    const STATUSLINE_MODELS: &str =
-        include_str!("../../tests/fixtures/claude_statusline_model_limits.json");
+    const USAGE: &str = include_str!("../../tests/fixtures/claude_usage.json");
 
-    fn cache_of(raw: &str) -> ClaudeCache {
-        serde_json::from_str::<ClaudeInput>(raw)
-            .expect("фикстура должна разбираться")
-            .into_cache(1_000)
+    fn windows() -> Vec<QuotaWindow> {
+        windows_from_usage(USAGE).unwrap()
     }
 
-    fn keys(cache: &ClaudeCache) -> Vec<&str> {
-        cache.windows.iter().map(|w| w.key.as_str()).collect()
+    fn keys(windows: &[QuotaWindow]) -> Vec<&str> {
+        windows.iter().map(|w| w.key.as_str()).collect()
     }
 
     #[test]
-    fn parses_real_statusline_payload() {
-        let cache = cache_of(STATUSLINE);
-        assert_eq!(cache.model.as_deref(), Some("Opus 5"));
-        assert_eq!(keys(&cache), ["five_hour", "seven_day"]);
-
-        let five = &cache.windows[0];
-        assert_eq!(five.used_percent, 42.5);
-        assert_eq!(five.remaining_percent, 57.5);
-        assert_eq!(five.duration_mins, Some(FIVE_HOUR_MINS));
-        assert_eq!(five.resets_at, Some(1_800_000_000));
-        assert_eq!(five.label, "5 часов");
-
-        assert_eq!(cache.windows[1].remaining_percent, 90.0);
-        assert_eq!(cache.windows[1].label, "Неделя");
-    }
-
-    #[test]
-    fn keeps_per_model_limits_such_as_fable() {
-        // Главное требование: лимит конкретной модели не должен теряться.
-        let cache = cache_of(STATUSLINE_MODELS);
+    fn parses_the_live_usage_response() {
+        let windows = windows();
         assert_eq!(
-            keys(&cache),
-            [
-                "five_hour",
-                "seven_day",
-                "seven_day_fable",
-                "seven_day_opus",
-                "seven_day_overage_included",
-                "seven_day_sonnet",
-            ]
+            keys(&windows),
+            ["session", "weekly_all", "weekly_scoped:fable"]
         );
-        let fable = cache
-            .windows
+
+        assert_eq!(windows[0].label, "5 часов");
+        assert_eq!(windows[0].remaining_percent, 71.0);
+        assert_eq!(windows[0].duration_mins, Some(FIVE_HOUR_MINS));
+
+        assert_eq!(windows[1].label, "Неделя");
+        assert_eq!(windows[1].remaining_percent, 34.0);
+    }
+
+    #[test]
+    fn keeps_the_per_model_limit() {
+        // Ради него всё и затевалось: лимит модели есть только в limits[].
+        let windows = windows();
+        let fable = windows
             .iter()
-            .find(|w| w.key == "seven_day_fable")
+            .find(|w| w.key == "weekly_scoped:fable")
             .expect("лимит Fable должен сохраниться");
         assert_eq!(fable.label, "Неделя · Fable");
-        assert_eq!(fable.remaining_percent, 12.0);
+        assert_eq!(fable.remaining_percent, 0.0);
+        assert_eq!(fable.duration_mins, Some(WEEKLY_MINS));
     }
 
     #[test]
-    fn an_unknown_future_limit_still_gets_a_readable_label() {
-        // Лимит временный: если Anthropic заменит его другим, код менять не надо.
-        let input = r#"{"rate_limits":{"seven_day_haiku_turbo":{"used_percentage":5.0}}}"#;
-        let cache = cache_of(input);
-        assert_eq!(cache.windows[0].label, "Неделя · Haiku Turbo");
-        assert_eq!(cache.windows[0].duration_mins, Some(WEEKLY_MINS));
+    fn a_new_scoped_limit_needs_no_code_change() {
+        let raw = r#"{"limits":[{"kind":"weekly_scoped","percent":10,
+            "scope":{"model":{"display_name":"Haiku"}}}]}"#;
+        let windows = windows_from_usage(raw).unwrap();
+        assert_eq!(windows[0].label, "Неделя · Haiku");
+        assert_eq!(windows[0].key, "weekly_scoped:haiku");
     }
 
     #[test]
-    fn a_limit_with_an_unrecognised_shape_is_labelled_not_dropped() {
-        let input = r#"{"rate_limits":{"monthly_credits":{"used_percentage":30.0}}}"#;
-        let cache = cache_of(input);
-        assert_eq!(cache.windows[0].label, "Monthly Credits");
-        assert!(cache.windows[0].duration_mins.is_none());
+    fn an_unknown_kind_still_gets_a_label() {
+        let raw = r#"{"limits":[{"kind":"monthly_credits","percent":30}]}"#;
+        let windows = windows_from_usage(raw).unwrap();
+        assert_eq!(windows[0].label, "Monthly Credits");
+        assert!(windows[0].duration_mins.is_none());
     }
 
     #[test]
-    fn a_removed_limit_simply_disappears() {
-        let with_fable = cache_of(STATUSLINE_MODELS);
-        assert!(with_fable
-            .windows
-            .iter()
-            .any(|w| w.key == "seven_day_fable"));
-        let without = cache_of(STATUSLINE);
-        assert!(!without.windows.iter().any(|w| w.key == "seven_day_fable"));
+    fn a_withdrawn_limit_simply_disappears() {
+        let raw = r#"{"limits":[{"kind":"session","percent":5}]}"#;
+        let windows = windows_from_usage(raw).unwrap();
+        assert_eq!(keys(&windows), ["session"]);
     }
 
     #[test]
-    fn window_order_is_stable_across_parses() {
-        // serde_json::Map не гарантирует порядок, а прыгающие строки в меню
-        // выглядят как баг.
-        let first = keys(&cache_of(STATUSLINE_MODELS)).join(",");
+    fn entries_without_a_percent_are_skipped() {
+        let raw = r#"{"limits":[{"kind":"session"},{"kind":"weekly_all","percent":1}]}"#;
+        assert_eq!(keys(&windows_from_usage(raw).unwrap()), ["weekly_all"]);
+    }
+
+    #[test]
+    fn an_empty_limits_array_is_not_an_error() {
+        assert!(windows_from_usage(r#"{"limits":[]}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_json_is_an_error() {
+        assert!(windows_from_usage("{not json").is_err());
+    }
+
+    #[test]
+    fn order_is_stable_and_shortest_first() {
+        let first = keys(&windows()).join(",");
         for _ in 0..5 {
-            assert_eq!(keys(&cache_of(STATUSLINE_MODELS)).join(","), first);
+            assert_eq!(keys(&windows()).join(","), first);
         }
-    }
-
-    #[test]
-    fn shorter_windows_come_first() {
-        let cache = cache_of(STATUSLINE_MODELS);
-        let durations: Vec<_> = cache.windows.iter().map(|w| w.duration_mins).collect();
+        let durations: Vec<_> = windows().iter().map(|w| w.duration_mins).collect();
         let mut sorted = durations.clone();
         sorted.sort();
         assert_eq!(durations, sorted);
     }
 
     #[test]
-    fn entries_without_a_percentage_are_skipped() {
-        let input =
-            r#"{"rate_limits":{"five_hour":{"resets_at":5},"seven_day":{"used_percentage":10.0}}}"#;
-        assert_eq!(keys(&cache_of(input)), ["seven_day"]);
-    }
-
-    #[test]
-    fn formats_status_line_with_remaining_not_used() {
+    fn parses_the_timestamp_format_the_endpoint_returns() {
+        // 2026-07-30T15:59:59Z
         assert_eq!(
-            cache_of(STATUSLINE).status_line(),
-            "[Opus 5] · 5h 58% left · 7d 90% left"
+            rfc3339_to_unix("2026-07-30T15:59:59.352117+00:00"),
+            Some(1_785_427_199)
         );
+        assert_eq!(rfc3339_to_unix("2026-07-30T15:59:59Z"), Some(1_785_427_199));
+        assert_eq!(rfc3339_to_unix("1970-01-01T00:00:00Z"), Some(0));
     }
 
     #[test]
-    fn status_line_names_per_model_limits() {
-        let line = cache_of(STATUSLINE_MODELS).status_line();
-        assert!(line.contains("7d/fable 12% left"), "{line}");
-        assert!(line.contains("5h "), "{line}");
+    fn applies_the_timezone_offset() {
+        let utc = rfc3339_to_unix("2026-07-30T15:00:00Z").unwrap();
+        // +02:00 означает, что тот же момент наступил на два часа раньше по UTC.
+        assert_eq!(rfc3339_to_unix("2026-07-30T17:00:00+02:00"), Some(utc));
+        assert_eq!(rfc3339_to_unix("2026-07-30T13:00:00-02:00"), Some(utc));
     }
 
     #[test]
-    fn payload_without_rate_limits_is_accepted() {
-        // Так выглядит payload у не-подписчика или до первого ответа модели.
-        let cache = cache_of(r#"{"model":{"display_name":"Opus 5"}}"#);
-        assert!(cache.windows.is_empty());
-        assert_eq!(cache.status_line(), "[Opus 5]");
+    fn rejects_junk_timestamps() {
+        for raw in ["", "не дата", "2026-07-30", "2026-13-40T00:00:00Z"] {
+            assert!(rfc3339_to_unix(raw).is_none(), "принято: {raw}");
+        }
+    }
+
+    #[test]
+    fn handles_leap_years_and_century_rules() {
+        assert_eq!(rfc3339_to_unix("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        assert_eq!(rfc3339_to_unix("2000-03-01T00:00:00Z"), Some(951_868_800));
+        assert_eq!(rfc3339_to_unix("2026-01-01T00:00:00Z"), Some(1_767_225_600));
     }
 
     #[test]
@@ -430,53 +571,6 @@ mod tests {
         assert_eq!(plan_label("claude_max"), "Max");
         assert_eq!(plan_label("claude_pro"), "Pro");
         assert_eq!(plan_label("enterprise"), "Enterprise");
-    }
-
-    #[test]
-    fn fresh_cache_is_ok() {
-        let state = state_from_cache(
-            "id",
-            "Claude",
-            None,
-            None,
-            cache_of(STATUSLINE),
-            DEFAULT_STALE_SECONDS,
-            1_500,
-        );
-        assert_eq!(state.status, "ok");
-        assert!(state.error.is_none());
-        assert_eq!(state.updated_at, 1_000);
-    }
-
-    #[test]
-    fn cache_older_than_threshold_is_stale_but_keeps_quota() {
-        let now = 1_000 + DEFAULT_STALE_SECONDS + 1;
-        let state = state_from_cache(
-            "id",
-            "Claude",
-            None,
-            None,
-            cache_of(STATUSLINE),
-            DEFAULT_STALE_SECONDS,
-            now,
-        );
-        assert_eq!(state.status, "stale");
-        assert!(state.error.is_some());
-        assert_eq!(state.windows.len(), 2);
-    }
-
-    #[test]
-    fn clock_going_backwards_does_not_mark_stale() {
-        let state = state_from_cache(
-            "id",
-            "Claude",
-            None,
-            None,
-            cache_of(STATUSLINE),
-            DEFAULT_STALE_SECONDS,
-            0,
-        );
-        assert_eq!(state.status, "ok");
     }
 
     #[test]
@@ -503,9 +597,34 @@ mod tests {
     }
 
     #[test]
+    fn falls_back_to_the_cache_claude_code_writes() {
+        let dir = std::env::temp_dir().join(format!(
+            "ai-usage-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let profile = dir.join(".claude");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            dir.join(".claude.json"),
+            r#"{"cachedUsageUtilization":{"fetchedAtMs":1785144456226,
+                "utilization":{"limits":[{"kind":"session","percent":3}]}}}"#,
+        )
+        .unwrap();
+
+        let (windows, fetched_at) = cached_usage(&profile).expect("кеш должен читаться");
+        assert_eq!(windows[0].key, "session");
+        assert_eq!(fetched_at, 1_785_144_456);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn missing_claude_config_is_not_an_error() {
         let identity = read_identity(Path::new("/nonexistent/profile"));
         assert!(identity.email.is_none());
         assert!(identity.plan.is_none());
+        assert!(cached_usage(Path::new("/nonexistent/profile")).is_none());
+        assert!(read_token(Path::new("/nonexistent/profile")).is_none());
     }
 }

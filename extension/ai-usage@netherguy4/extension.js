@@ -16,19 +16,13 @@ export default class AiUsageExtension extends Extension {
         this._reloadSource = 0;
 
         this._indicator = new PanelMenu.Button(0.0, this.metadata.name, false);
-        const box = new St.BoxLayout({style_class: 'panel-status-menu-box'});
-        this._icon = new St.Icon({
-            icon_name: 'utilities-system-monitor-symbolic',
-            style_class: 'system-status-icon',
-        });
+        // Значка нет намеренно: он не нёс информации, а место в панели занимал.
         this._label = new St.Label({
             text: 'AI',
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'ai-usage-panel-label',
         });
-        box.add_child(this._icon);
-        box.add_child(this._label);
-        this._indicator.add_child(box);
+        this._indicator.add_child(this._label);
         Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
 
         const runtimeDir = GLib.get_user_runtime_dir();

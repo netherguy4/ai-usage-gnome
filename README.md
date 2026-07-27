@@ -2,7 +2,7 @@
 
 Нативный индикатор в верхней панели GNOME для нескольких аккаунтов:
 
-- **Claude Code** — тариф, почта и все лимиты, которые вернул провайдер: 5-часовой, недельный и отдельные лимиты моделей;
+- **Claude Code** — тариф, почта и все лимиты аккаунта: 5-часовой, недельный и отдельные лимиты моделей;
 - **Codex** — тариф/email, остаток короткого и недельного лимитов;
 - **DeepSeek API** — доступный баланс;
 - любое количество профилей через отдельные `CLAUDE_CONFIG_DIR` и `CODEX_HOME`.
@@ -105,15 +105,15 @@ journalctl --user -u ai-usage.service -f
 CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude
 ```
 
-Мастер добавляет в `settings.json` официальный Claude Code `statusLine` command. Он забирает **все** ключи из `rate_limits`, записывает их в локальный кеш и одновременно показывает краткую строку в Claude Code.
+Лимиты запрашиваются напрямую у Anthropic — по тому же официальному endpoint, который опрашивает сам Claude Code, с OAuth-токеном из вашего профиля. Ничего настраивать и запускать не нужно: цифры обновляются в фоне вместе с остальными аккаунтами.
 
-Список лимитов намеренно не зашит в код. Помимо `five_hour` и `seven_day` Claude Code присылает `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included` и отдельные лимиты моделей. Такие лимиты бывают временными: если Anthropic его уберёт, строка просто исчезнет из меню, а если добавит новый — он появится сам, без обновления приложения.
+`settings.json` при этом не меняется. Если хочется видеть лимиты **ещё и внутри** Claude Code, добавьте `--hook` — тогда в `settings.json` пропишется `statusLine`, а перед изменением появится резервная копия `settings.json.ai-usage.bak`, которую вернёт удаление аккаунта.
 
-Тариф и почта читаются из `.claude.json`, который пишет сам Claude Code. Указывать `--plan` вручную нужно, только если хочется переопределить определённое значение.
+Список лимитов не зашит в код: показывается всё, что вернул сервер, включая лимиты отдельных моделей. Такие лимиты бывают временными — если Anthropic его уберёт, строка просто исчезнет, а если добавит новый, он появится сам, без обновления приложения.
 
-Перед изменением существующего `settings.json` создаётся резервная копия `settings.json.ai-usage.bak`. Удаление проекта восстанавливает её.
+Тариф и почта читаются из `.claude.json`, который пишет сам Claude Code. `--plan` нужен, только чтобы переопределить определённое значение.
 
-**Ограничение Claude:** данные обновляются только после ответа Claude Code. Если аккаунтом давно не пользовались, виджет помечает данные как устаревшие.
+**Ограничение Claude:** OAuth-токен живёт около восьми часов, и обновляет его только сам Claude Code. Если вы не запускали его дольше, виджет покажет последние данные из кеша Claude Code и пометит их возраст.
 
 ### Несколько Codex-аккаунтов
 
@@ -193,7 +193,7 @@ ai-usage account list|add|remove|rename    управление аккаунта
 ai-usage config show|set       частота обновления и порог устаревания
 ai-usage doctor                диагностика
 ai-usage init                  создать пустой config.toml
-ai-usage claude-hook ...       внутренний Claude status-line hook
+ai-usage claude-hook ...       необязательный status line внутри Claude Code
 ai-usage restore-claude-hooks  восстановить Claude settings.json
 ```
 
@@ -218,7 +218,7 @@ git push origin v0.1.0
 ## Используемые официальные интерфейсы
 
 - [Codex App Server](https://developers.openai.com/codex/app-server)
-- [Claude Code status line](https://code.claude.com/docs/en/statusline)
+- [Claude Code status line](https://code.claude.com/docs/en/statusline) — для необязательного `--hook`
 - [DeepSeek Get User Balance](https://api-docs.deepseek.com/api/get-user-balance)
 - [GNOME Shell extension guide](https://gjs.guide/extensions/)
 

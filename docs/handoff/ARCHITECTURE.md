@@ -5,8 +5,8 @@
 ## Общая схема
 
 ```text
-Claude Code statusLine ──┐
-                         │ local cache
+Anthropic usage API ─────┐
+                         │
 Codex app-server ────────┼──> Rust ai-usage daemon ──atomic write──> state.json
                          │                                      │
 DeepSeek HTTP API ───────┘                                      └──> GNOME GJS extension
@@ -27,7 +27,7 @@ GNOME extension не обращается к провайдерам. Это со
 - `setup` — интерактивная настройка;
 - `doctor` — локальная диагностика;
 - `init` — пустой config;
-- `claude-hook` — внутренний status-line обработчик;
+- `claude-hook` — необязательный status line внутри Claude Code;
 - `restore-claude-hooks` — восстановление Claude settings.
 
 Каждый refresh клонирует account config и запускает provider fetch в `tokio::task::JoinSet`. Порядок аккаунтов после параллельного выполнения восстанавливается по исходному индексу.
@@ -65,23 +65,23 @@ $XDG_CONFIG_HOME/ai-usage/config.toml
 
 ### Claude provider
 
-Файлы: `src/providers/claude.rs`, hook в `src/main.rs`, установка в `src/setup.rs`.
+Файлы: `src/providers/claude.rs`, необязательный hook в `src/main.rs` и `src/setup.rs`.
 
 Поток:
 
-1. setup создаёт backup `settings.json.ai-usage.bak`, если settings уже существует и backup ещё не создан;
-2. поле `statusLine` заменяется командой текущего `ai-usage` binary;
-3. Claude Code передаёт JSON в stdin hook;
-4. hook извлекает `model.display_name` и **все** ключи из `rate_limits` — помимо документированных `five_hour`/`seven_day` там встречаются `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included` и лимиты отдельных моделей;
-5. cache пишется в `$XDG_DATA_HOME/ai-usage/claude/<account-id>.json`;
-6. daemon читает cache, а не запускает Claude.
+1. из `<config_dir>/.credentials.json` читается OAuth access token — тот же файл, что ведёт сам Claude Code;
+2. выполняется `GET https://api.anthropic.com/api/oauth/usage` с этим токеном;
+3. массив `limits[]` превращается в окна: он надмножество верхнеуровневых полей и только в нём приходят лимиты, привязанные к модели (`weekly_scoped` + `scope.model`);
+4. если токен истёк или сети нет — берётся `cachedUsageUtilization` из `.claude.json`, который Claude Code обновляет при каждом запуске, с честным возрастом данных.
 
-Наш hook опознаётся по маркеру `claude-hook --account '<id>'` в команде. Опознавание по подстроке «ai-usage» в пути к бинарнику было бы неверным: путь зависит от места установки и может как случайно совпасть, так и не совпасть.
+Раньше данные приходили из status-line hook, то есть только когда пользователь работал в Claude Code. Активный опрос убрал это требование: виджету больше не нужно ни ставить hook, ни трогать `settings.json`.
+
+Hook остался как необязательная косметика (`--hook`) — показать лимиты внутри самого Claude Code. Он опознаётся по маркеру `claude-hook --account '<id>'` в команде; опознавание по подстроке «ai-usage» в пути к бинарнику было бы неверным, так как путь зависит от места установки.
 
 Ограничения архитектуры:
 
-- тариф и почта Claude читаются из `.claude.json`, который пишет сам Claude Code; заданный вручную `plan` в конфиге имеет приоритет;
-- данные обновляются только после ответа Claude Code;
+- тариф и почта Claude читаются из `.claude.json`; заданный вручную `plan` в конфиге имеет приоритет;
+- access token живёт около 8 часов и обновляется только самим Claude Code — мы принципиально не пишем в `.credentials.json`, чтобы не сломать вход;
 - stale threshold настраивается через `stale_seconds`, по умолчанию 24 часа;
 - два account ID с одним `CLAUDE_CONFIG_DIR` отклоняются валидацией конфига.
 
@@ -123,6 +123,7 @@ Extension:
 - читает `$XDG_RUNTIME_DIR/ai-usage/state.json`;
 - использует `Gio.FileMonitor` и резервный timer раз в 60 секунд;
 - показывает аккаунты, лимиты, reset countdown, balance, возраст данных и ошибки;
+- значка в панели нет намеренно: он не нёс информации и занимал место;
 - отличает `stale` (данные есть, но устарели) от `error` (данных нет вовсе);
 - panel label показывает значок каждого провайдера и его худший остаток: общий минимум не позволял понять, чей лимит заканчивается;
 - «Обновить сейчас» перезапускает `ai-usage.service`.
@@ -135,7 +136,6 @@ Extension:
 ~/.local/bin/ai-usage
 ~/.local/bin/ai-usage-uninstall
 ~/.local/share/gnome-shell/extensions/ai-usage@netherguy4/
-~/.local/share/ai-usage/claude/*.json
 ~/.config/ai-usage/config.toml
 ~/.config/ai-usage/secrets.env
 ~/.config/systemd/user/ai-usage.service
