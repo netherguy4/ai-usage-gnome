@@ -1,14 +1,25 @@
-.ai-usage-panel-label {
-  margin-left: 4px;
-  margin-right: 6px;
+/* Отступы держим только здесь. Штатный класс `system-status-icon` мы
+   намеренно не вешаем: тема задаёт ему `padding: 0 6px; margin: 0 4px`
+   селектором `#panel .panel-button .system-status-icon`, который перебивает
+   любой одиночный класс расширения, и между значком и числом появлялось
+   14 px пустоты. */
+.ai-usage-panel-box {
+  spacing: 10px;
 }
 
-.ai-usage-panel-label:last-child {
-  margin-right: 0;
+.ai-usage-panel-item {
+  spacing: 3px;
 }
 
 .ai-usage-panel-icon {
   icon-size: 14px;
+  padding: 0;
+  margin: 0;
+}
+
+.ai-usage-panel-label {
+  padding: 0;
+  margin: 0;
 }
 
 .ai-usage-menu-row {

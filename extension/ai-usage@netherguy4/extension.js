@@ -19,7 +19,7 @@ export default class AiUsageExtension extends Extension {
         this._iconDir = this.dir.get_child('icons');
 
         this._indicator = new PanelMenu.Button(0.0, this.metadata.name, false);
-        this._panelBox = new St.BoxLayout({style_class: 'panel-status-menu-box'});
+        this._panelBox = new St.BoxLayout({style_class: 'ai-usage-panel-box'});
         this._indicator.add_child(this._panelBox);
         Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
 
@@ -170,18 +170,23 @@ export default class AiUsageExtension extends Extension {
         }
 
         for (const entry of summary) {
+            // Значок и число живут в собственном контейнере: так пара держится
+            // вместе, а расстояние между аккаунтами задаётся отдельно.
+            const item = new St.BoxLayout({style_class: 'ai-usage-panel-item'});
             const gicon = this._providerIcon(entry.provider);
             if (gicon) {
-                this._panelBox.add_child(new St.Icon({
+                item.add_child(new St.Icon({
                     gicon,
-                    style_class: 'system-status-icon ai-usage-panel-icon',
+                    y_align: Clutter.ActorAlign.CENTER,
+                    style_class: 'ai-usage-panel-icon',
                 }));
             }
-            this._panelBox.add_child(new St.Label({
+            item.add_child(new St.Label({
                 text: entry.text,
                 y_align: Clutter.ActorAlign.CENTER,
                 style_class: 'ai-usage-panel-label',
             }));
+            this._panelBox.add_child(item);
         }
     }
 
