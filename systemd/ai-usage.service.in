@@ -5,6 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Сервис поднимается из default.target раньше, чем GNOME-сессия импортирует
+# PATH логин-шелла, поэтому пользовательские каталоги добавляем явно: иначе
+# демон не найдёт codex, установленный в ~/.local/bin.
+Environment=PATH=@BIN_DIR@:%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin
 ExecStart="@BINARY@" daemon
 EnvironmentFile=-@SECRETS@
 Restart=on-failure

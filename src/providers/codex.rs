@@ -24,7 +24,18 @@ pub async fn fetch(
     limit_id: &str,
 ) -> Result<AccountState> {
     let codex_home = crate::util::expand_home(codex_home);
-    let mut child = Command::new(command)
+    // Демон стартует до того, как сессия добавит ~/.local/bin в PATH, поэтому
+    // короткое имя команды резолвим сами, а не полагаемся на окружение.
+    let resolved = crate::util::resolve_command(command).ok_or_else(|| {
+        anyhow!(
+            "Команда '{command}' не найдена ни в PATH, ни в стандартных \
+             пользовательских каталогах. Укажи абсолютный путь: \
+             ai-usage account add codex --id {id} --codex-home {} --command /путь/к/codex",
+            codex_home.display()
+        )
+    })?;
+
+    let mut child = Command::new(&resolved)
         .arg("app-server")
         .env("CODEX_HOME", &codex_home)
         .stdin(Stdio::piped())
@@ -32,7 +43,7 @@ pub async fn fetch(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("Не удалось запустить '{command} app-server'"))?;
+        .with_context(|| format!("Не удалось запустить '{resolved} app-server'"))?;
 
     let mut stdin = child
         .stdin

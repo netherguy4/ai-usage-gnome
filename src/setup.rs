@@ -421,22 +421,7 @@ fn non_empty(value: String) -> Option<String> {
 }
 
 fn resolve_command(command: &str) -> Option<String> {
-    let path = Path::new(command);
-    if path.components().count() > 1 {
-        let expanded = crate::util::expand_home(path);
-        return expanded
-            .exists()
-            .then(|| expanded.to_string_lossy().into_owned());
-    }
-
-    let search_path = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&search_path) {
-        let candidate = directory.join(command);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    None
+    crate::util::resolve_command(command)
 }
 
 fn restart_service() {

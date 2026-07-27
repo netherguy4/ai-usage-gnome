@@ -289,11 +289,28 @@ fn build_account(command: AddCommand) -> Result<Added> {
             limit_id,
         } => {
             util::validate_id(&common.id)?;
+            // Записываем абсолютный путь, как это делает интерактивный мастер:
+            // демон стартует раньше, чем сессия наполнит PATH.
+            let command = match util::resolve_command(&executable) {
+                Some(resolved) => {
+                    if resolved != executable {
+                        println!("Команда '{executable}' найдена: {resolved}");
+                    }
+                    resolved
+                }
+                None => {
+                    println!(
+                        "Внимание: команда '{executable}' сейчас не найдена. \
+                         Она будет искаться при каждом обновлении."
+                    );
+                    executable
+                }
+            };
             Ok(Added::plain(AccountConfig::Codex {
                 name: common.name.unwrap_or_else(|| common.id.clone()),
                 id: common.id,
                 codex_home,
-                command: executable,
+                command,
                 limit_id,
             }))
         }

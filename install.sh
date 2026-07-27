@@ -68,7 +68,7 @@ touch "$SECRETS"
 chmod 600 "$SECRETS"
 # Подстановка через python3, а не sed: пути могут содержать |, & и обратные
 # слеши, которые sed интерпретирует как спецсимволы замены.
-BINARY="$BINARY" SECRETS="$SECRETS" python3 - \
+BINARY="$BINARY" SECRETS="$SECRETS" BIN_DIR="$BIN_DIR" python3 - \
   "$ROOT/systemd/ai-usage.service.in" "$SERVICE" <<'PY'
 import os
 import sys
@@ -76,8 +76,8 @@ import sys
 source, target = sys.argv[1:3]
 with open(source, encoding="utf-8") as handle:
     text = handle.read()
-text = text.replace("@BINARY@", os.environ["BINARY"])
-text = text.replace("@SECRETS@", os.environ["SECRETS"])
+for name in ("BINARY", "SECRETS", "BIN_DIR"):
+    text = text.replace(f"@{name}@", os.environ[name])
 with open(target, "w", encoding="utf-8") as handle:
     handle.write(text)
 PY
