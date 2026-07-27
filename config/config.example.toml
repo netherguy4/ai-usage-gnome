@@ -1,0 +1,31 @@
+refresh_seconds = 120
+
+[[accounts]]
+provider = "claude"
+id = "claude-main"
+name = "Claude"
+config_dir = "~/.claude"
+plan = "Pro"
+
+[[accounts]]
+provider = "codex"
+id = "codex-main"
+name = "Codex Personal"
+codex_home = "~/.codex"
+command = "codex"
+limit_id = "codex"
+
+[[accounts]]
+provider = "codex"
+id = "codex-work"
+name = "Codex Work"
+codex_home = "~/.codex-work"
+command = "codex"
+limit_id = "codex"
+
+[[accounts]]
+provider = "deepseek"
+id = "deepseek-main"
+name = "DeepSeek"
+api_key_env = "AI_USAGE_DEEPSEEK_DEEPSEEK_MAIN"
+base_url = "https://api.deepseek.com"

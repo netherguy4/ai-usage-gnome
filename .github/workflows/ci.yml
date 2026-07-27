@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Format Rust sources
+        run: cargo fmt --all
+
+      - name: Rust tests
+        run: cargo test --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Check GNOME extension syntax
+        run: node --check extension/ai-usage@netherguy4/extension.js
+
+      - name: Check shell scripts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck install.sh uninstall.sh install-online.sh scripts/package.sh

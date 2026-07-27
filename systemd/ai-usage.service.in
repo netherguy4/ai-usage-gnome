@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Usage GNOME backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@BINARY@ daemon
+EnvironmentFile=-@SECRETS@
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
