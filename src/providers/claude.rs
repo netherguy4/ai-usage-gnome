@@ -284,10 +284,18 @@ pub fn read_identity(config_dir: &Path) -> Identity {
             .and_then(|account| account.get("emailAddress"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let plan = account
-            .and_then(|account| account.get("organizationType"))
-            .and_then(Value::as_str)
-            .map(plan_label);
+        // organizationType даёт только 'claude_max' — без множителя лимитов,
+        // а именно он отличает Max 5x от Max 20x. Тариф пользователя важнее
+        // тарифа организации: у участника может быть свой.
+        let plan = [
+            "userRateLimitTier",
+            "organizationRateLimitTier",
+            "organizationType",
+        ]
+        .iter()
+        .filter_map(|field| account.and_then(|account| account.get(*field)))
+        .find_map(Value::as_str)
+        .map(plan_label);
 
         if email.is_some() || plan.is_some() {
             return Identity { email, plan };
@@ -306,9 +314,8 @@ fn identity_paths(config_dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// `claude_max` → `Max`. Неизвестные значения показываем как есть.
 fn plan_label(raw: &str) -> String {
-    humanize(raw.strip_prefix("claude_").unwrap_or(raw))
+    crate::util::humanize_plan(raw)
 }
 
 /// Кеш использования, который Claude Code сам сохраняет в `.claude.json`.
@@ -570,10 +577,54 @@ mod tests {
     }
 
     #[test]
-    fn plan_labels_are_readable() {
+    fn plan_labels_distinguish_rate_limit_tiers() {
+        // Без множителя нельзя понять, какой Max используется.
+        assert_eq!(plan_label("default_claude_max_5x"), "Max 5x");
+        assert_eq!(plan_label("default_claude_max_20x"), "Max 20x");
+        assert_eq!(plan_label("default_claude_zero"), "Zero");
         assert_eq!(plan_label("claude_max"), "Max");
-        assert_eq!(plan_label("claude_pro"), "Pro");
         assert_eq!(plan_label("enterprise"), "Enterprise");
+    }
+
+    #[test]
+    fn prefers_the_rate_limit_tier_over_the_organization_type() {
+        let dir = std::env::temp_dir().join(format!(
+            "ai-usage-tier-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let profile = dir.join(".claude");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            dir.join(".claude.json"),
+            r#"{"oauthAccount":{"emailAddress":"u@example.com",
+                "organizationType":"claude_max",
+                "organizationRateLimitTier":"default_claude_max_20x"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_identity(&profile).plan.as_deref(), Some("Max 20x"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_member_tier_wins_over_the_organization_tier() {
+        let dir = std::env::temp_dir().join(format!(
+            "ai-usage-member-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let profile = dir.join(".claude");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            dir.join(".claude.json"),
+            r#"{"oauthAccount":{"userRateLimitTier":"default_claude_max_5x",
+                "organizationRateLimitTier":"default_claude_max_20x"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_identity(&profile).plan.as_deref(), Some("Max 5x"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -80,7 +80,7 @@ Hook остался как необязательная косметика (`--h
 
 Ограничения архитектуры:
 
-- тариф и почта Claude читаются из `.claude.json`; заданный вручную `plan` в конфиге имеет приоритет;
+- тариф и почта Claude читаются из `.claude.json`. Тариф берётся из `userRateLimitTier` → `organizationRateLimitTier` → `organizationType`: только уровень лимитов различает `Max 5x` и `Max 20x`, тогда как `organizationType` для обоих даёт `claude_max`. Заданный вручную `plan` в конфиге имеет приоритет над определённым;
 - access token живёт около 8 часов и обновляется только самим Claude Code — мы принципиально не пишем в `.credentials.json`, чтобы не сломать вход;
 - stale threshold настраивается через `stale_seconds`, по умолчанию 24 часа;
 - два account ID с одним `CLAUDE_CONFIG_DIR` отклоняются валидацией конфига.
@@ -94,7 +94,7 @@ Hook остался как необязательная косметика (`--h
 1. запускается `<command> app-server` с отдельным `CODEX_HOME`;
 2. по stdin отправляются JSONL-сообщения `initialize`, `initialized`, `account/read`, `account/rateLimits/read`;
 3. stdout читается до ответов ID `1` и `2`, максимум 20 секунд;
-4. account даёт email и `planType`;
+4. account даёт email и `planType` (`plus`/`pro`/`business`/…), который приводится к тому же виду, что и тариф Claude;
 5. rate-limit bucket выбирается по `limit_id`, по умолчанию `codex`;
 6. `primary` и `secondary` становятся окнами с подписью по длительности;
 7. subprocess завершается.

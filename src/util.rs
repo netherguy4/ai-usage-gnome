@@ -102,6 +102,32 @@ pub fn env_name_for_id(id: &str) -> String {
     format!("AI_USAGE_DEEPSEEK_{normalized}")
 }
 
+/// `claude_max_5x` → `Max 5x`, `plus` → `Plus`.
+///
+/// Тариф приходит от провайдеров машинным идентификатором, а в панели должен
+/// читаться человеком. Цифровые части (`5x`, `20x`) остаются как есть —
+/// именно они отличают тарифы друг от друга.
+pub fn humanize_plan(raw: &str) -> String {
+    let trimmed = raw
+        .strip_prefix("default_claude_")
+        .or_else(|| raw.strip_prefix("default_"))
+        .or_else(|| raw.strip_prefix("claude_"))
+        .unwrap_or(raw);
+
+    trimmed
+        .split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -231,6 +257,24 @@ mod tests {
         assert_eq!(mode, 0o600);
         assert_eq!(fs::read_to_string(&path).unwrap(), "KEY=two\n");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn plan_names_stay_readable_and_keep_their_multiplier() {
+        // Множитель — единственное, что отличает Max 5x от Max 20x.
+        assert_eq!(humanize_plan("default_claude_max_5x"), "Max 5x");
+        assert_eq!(humanize_plan("default_claude_max_20x"), "Max 20x");
+        assert_eq!(humanize_plan("claude_max"), "Max");
+        assert_eq!(humanize_plan("plus"), "Plus");
+        assert_eq!(humanize_plan("pro"), "Pro");
+        assert_eq!(humanize_plan("business"), "Business");
+        assert_eq!(humanize_plan("team"), "Team");
+    }
+
+    #[test]
+    fn an_unknown_plan_is_shown_rather_than_dropped() {
+        assert_eq!(humanize_plan("some_future_tier_3x"), "Some Future Tier 3x");
+        assert_eq!(humanize_plan(""), "");
     }
 
     #[test]

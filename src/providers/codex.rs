@@ -346,10 +346,12 @@ pub fn parse_account_state(
         .get("email")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // planType приходит как 'plus'/'pro'/'business' — приводим к тому же виду,
+    // что и тариф Claude, иначе в одной панели соседствуют разные стили.
     let account_plan = account
         .get("planType")
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .map(crate::util::humanize_plan);
 
     reject_rpc_error(limits_message)?;
     let result = limits_message
@@ -380,7 +382,7 @@ pub fn parse_account_state(
     let bucket_plan = bucket
         .get("planType")
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .map(crate::util::humanize_plan);
 
     Ok(AccountState {
         id: id.to_owned(),
@@ -465,7 +467,7 @@ mod tests {
         let state = state(ACCOUNT_OK, LIMITS_PLUS).unwrap();
 
         assert_eq!(state.status, "ok");
-        assert_eq!(state.plan.as_deref(), Some("plus"));
+        assert_eq!(state.plan.as_deref(), Some("Plus"));
         assert_eq!(state.email.as_deref(), Some("user@example.com"));
         assert!(state.error.is_none());
 
