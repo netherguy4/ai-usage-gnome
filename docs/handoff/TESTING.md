@@ -18,7 +18,7 @@ Commit:      ветка main, после «Add provider fixtures, tests, account
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-targets --locked      # 85 тестов
+cargo test --all-targets --locked      # 99 тестов
 cargo build --release --locked
 bash -n install.sh uninstall.sh install-online.sh scripts/package.sh
 gjs -m extension/ai-usage@netherguy4/extension.js   # разбор модуля
@@ -30,7 +30,7 @@ gjs -m extension/ai-usage@netherguy4/extension.js   # разбор модуля
 
 **Codex — X3, ошибки.** Отсутствующая команда, неавторизованный профиль и несуществующий `CODEX_HOME` дают разные внятные сообщения. Последний случай раньше давал только «Codex не вернул account/read»; теперь в ошибку попадает exit status и redacted-хвост stderr с настоящей причиной.
 
-**Claude — C1.** Hook установлен в реальный `~/.claude`, `doctor` его видит, payload реального формата даёт `[Opus 5 (1M context)] · 5h 63% left · 7d 38% left`, кеш пишется, `once` отдаёт model и оба окна. Схема payload сверена с документацией, встроенной в бинарь `claude` 2.1.220.
+**Claude — C1.** `GET /api/oauth/usage` с токеном из `~/.claude/.credentials.json` вернул HTTP 200 и три лимита: `session`, `weekly_all` и `weekly_scoped` со `scope.model = Fable`. `ai-usage once` показал их без единого действия пользователя и без изменения `settings.json`. Проверено, что `restore-claude-hooks` возвращает `settings.json` к исходному виду после отказа от hook.
 
 **Claude — C2, восстановление.** Шесть сценариев покрыты автотестами (`src/setup.rs`), плюс живая проверка: после `ai-usage-uninstall --keep-config` файл `~/.claude/settings.json` вернулся к исходному содержимому байт в байт, backup удалён.
 
@@ -42,15 +42,16 @@ gjs -m extension/ai-usage@netherguy4/extension.js   # разбор модуля
 
 **Release workflow.** `workflow_dispatch` собрал оба таргета; `file` подтвердил, что aarch64-артефакт — настоящий `ELF ARM aarch64`. `sha256sum -c SHA256SUMS` на скачанных архивах прошёл. Тег `v0.1.0-rc.1` опубликовал Release с тремя ассетами. Подстановка версии в `Cargo.toml` и `Cargo.lock` совместима со сборкой `--locked`: бинарь из архива сообщает `0.1.0-rc.1`.
 
+**DeepSeek — D1, живой ключ.** Реальный ключ отдал `status=ok`, `plan=API` и запись баланса в USD с `granted`/`topped_up`. Ключ лёг в `secrets.env` с правами 600; в `config.toml` хранится только имя переменной окружения.
+
 **Логика UI.** Чистые функции `extension.js` прогнаны под `gjs` на настоящем `state.json`: метка панели для ok/stale/error, форматирование возраста данных (включая часы, ушедшие вперёд, и нечисловой ввод), окна, деньги и статусы.
 
 **last-known-good.** После удачного refresh провайдер намеренно сломан: аккаунт перешёл в `stale`, сохранив квоту, plan и прежний `updated_at`, и показал текст ошибки.
 
 ### Не пройдено — требует действия пользователя
 
-- **Рендеринг расширения в GNOME Shell.** На Wayland Shell не пересканирует каталог расширений без перезапуска сессии: `gnome-extensions enable ai-usage@netherguy4` пока отвечает «расширение не найдено». Нужен выход из сессии и вход, затем enable и проверка пунктов из раздела «P0: GNOME/Bluefin integration» ниже.
-- **Автозапуск после reboot.** Unit `enabled` и `active`, но фактический цикл reboot → login не выполнялся.
-- **DeepSeek на живом ключе.** Ключа в среде нет; провайдер покрыт только mock-HTTP тестами.
+- **Рендеринг расширения в GNOME Shell.** После перезахода Shell видит расширение и держит его в состоянии ACTIVE без ошибок в журнале, но пункты меню глазами ещё не проверялись: логика отрисовки прогонялась только под `gjs` на настоящем `state.json`. Отдельная особенность: при обновлении поверх установленного Shell продолжает исполнять ранее загруженную копию — `ReloadExtension` в D-Bus объявлен, но не реализован, поэтому нужен новый перезаход.
+- **DeepSeek: ошибочные состояния.** Успешный ответ проверен на живом ключе; `depleted`, 401/403 и таймаут — только моками.
 - **aarch64 release artifact** и online installer против настоящего GitHub Release.
 
 ## P0: компиляция и базовое качество
