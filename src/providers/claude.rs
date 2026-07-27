@@ -3,18 +3,36 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::model::{label_for_duration, AccountState, QuotaWindow, FIVE_HOUR_MINS, WEEKLY_MINS};
 
-/// Пока порог не задан в конфиге, данные Claude считаются устаревшими через сутки.
-pub const DEFAULT_STALE_SECONDS: i64 = 86_400;
+/// Пока порог не задан в конфиге, данные Claude считаются устаревшими через
+/// четверть часа. Это 5% пятичасового окна: более старым цифрам верить нельзя,
+/// а раньше порог в сутки прятал отказ endpoint за многочасовым кешем.
+pub const DEFAULT_STALE_SECONDS: i64 = 900;
 
 /// Официальный endpoint, который опрашивает сам Claude Code.
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+/// Минимум между удачными запросами к endpoint лимитов.
+///
+/// Endpoint отвечает 429 задолго до общего интервала обновления: на живом
+/// аккаунте опрос раз в 120 с держал его в отказе постоянно. Пять минут — 1.7%
+/// пятичасового окна, для показа этого более чем достаточно.
+const MIN_POLL_SECONDS: i64 = 300;
+
+/// Пауза после 429: 5 → 10 → 20 → 40 → 60 минут. Бюджет endpoint делится с
+/// самим Claude Code, поэтому фиксированного интервала мало — нужен отход.
+/// Потолок в час: дальше отходить незачем, недельное окно столько не меняется.
+const BACKOFF_MAX_SECONDS: i64 = 3_600;
+
+/// Пауза после прочих ошибок: сеть или истёкший токен чинятся сами, долбить их
+/// смысла нет, но и отходить надолго не за что.
+const RETRY_SECONDS: i64 = 60;
 
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -341,6 +359,58 @@ fn cached_usage(config_dir: &Path) -> Option<(Vec<QuotaWindow>, i64)> {
     None
 }
 
+/// Наш собственный кеш ответа endpoint.
+///
+/// Живёт в runtime-каталоге рядом со `state.json` и переживает перезапуск
+/// сервиса: без него каждый рестарт начинал бы с пустой паузы и сразу же ловил
+/// 429. Здесь же хранится момент следующей попытки.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct UsageCache {
+    #[serde(default)]
+    fetched_at: i64,
+    #[serde(default)]
+    next_attempt_at: i64,
+    #[serde(default)]
+    failures: u32,
+    #[serde(default)]
+    windows: Vec<QuotaWindow>,
+}
+
+fn usage_cache_path(id: &str) -> PathBuf {
+    // `validate_id` уже не пускает сюда ничего лишнего, но имя файла собирается
+    // из внешней строки — фильтр стоит дешевле разбирательства с '../'.
+    let safe: String = id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    crate::util::runtime_dir().join(format!("claude-usage-{safe}.json"))
+}
+
+fn read_usage_cache(path: &Path) -> UsageCache {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_usage_cache(path: &Path, cache: &UsageCache) {
+    let Ok(bytes) = serde_json::to_vec(cache) else {
+        return;
+    };
+    // Ошибка записи не повод терять уже полученные цифры: кеш — ускоритель,
+    // а не источник истины. Но молчать о ней нельзя: без кеша теряется и момент
+    // следующей попытки, то есть пауза после `429` перестаёт соблюдаться.
+    if let Err(error) = crate::util::atomic_write_mode(path, &bytes, Some(0o600)) {
+        eprintln!("Не удалось сохранить кеш лимитов Claude: {error}");
+    }
+}
+
 fn read_token(config_dir: &Path) -> Option<OauthCredentials> {
     let path = crate::util::expand_home(config_dir).join(".credentials.json");
     let raw = fs::read_to_string(path).ok()?;
@@ -375,7 +445,6 @@ pub async fn fetch(
     config_dir: &Path,
     stale_seconds: i64,
 ) -> Result<AccountState> {
-    let _ = id;
     let identity = read_identity(config_dir);
     let plan = plan.or(identity.plan);
     let now = crate::util::unix_now();
@@ -395,33 +464,132 @@ pub async fn fetch(
             updated_at: at,
         };
 
-    match live_usage(config_dir, now).await {
-        Ok(windows) => Ok(state("ok", windows, None, now)),
-        Err(reason) => {
-            // Токен протух или сеть недоступна — показываем последнее, что
-            // сохранил сам Claude Code, честно указав возраст.
-            if let Some((windows, fetched_at)) = cached_usage(config_dir) {
-                let age = now.saturating_sub(fetched_at);
-                let status = if age > stale_seconds { "stale" } else { "ok" };
-                let error =
-                    (status == "stale").then(|| format!("{reason}; показан кеш Claude Code"));
-                return Ok(state(status, windows, error, fetched_at));
+    let cache_path = usage_cache_path(id);
+    let mut cache = read_usage_cache(&cache_path);
+
+    // Пока не вышла пауза — в сеть не идём вовсе. Лишний запрос не просто
+    // бесполезен: он продлевает отказ endpoint и для нас, и для Claude Code.
+    let mut failure = None;
+    if now >= cache.next_attempt_at {
+        match live_usage(config_dir, now).await {
+            Ok(windows) => {
+                cache = UsageCache {
+                    fetched_at: now,
+                    next_attempt_at: now + MIN_POLL_SECONDS,
+                    failures: 0,
+                    windows: windows.clone(),
+                };
+                write_usage_cache(&cache_path, &cache);
+                return Ok(state("ok", windows, None, now));
             }
-            Ok(state("waiting", Vec::new(), Some(reason.to_string()), now))
+            Err(error) => {
+                cache.failures = cache.failures.saturating_add(1);
+                cache.next_attempt_at = now
+                    + if error.rate_limited {
+                        backoff_seconds(cache.failures)
+                    } else {
+                        RETRY_SECONDS
+                    };
+                write_usage_cache(&cache_path, &cache);
+                failure = Some(error.message);
+            }
+        }
+    }
+
+    // Запроса не было или он не удался — показываем самое свежее из того, что
+    // уже есть: наш собственный ответ endpoint либо кеш Claude Code.
+    let own = (!cache.windows.is_empty()).then(|| (cache.windows.clone(), cache.fetched_at));
+    let Some((windows, fetched_at)) = choose_fallback(own, cached_usage(config_dir), now) else {
+        let reason = failure.unwrap_or_else(|| "Лимиты Claude ещё не получены".to_owned());
+        return Ok(state("waiting", Vec::new(), Some(reason), now));
+    };
+
+    let age = now.saturating_sub(fetched_at);
+    if windows.is_empty() {
+        let reason =
+            failure.unwrap_or_else(|| format!("данные Claude устарели на {}", humanize_age(age)));
+        return Ok(state("stale", Vec::new(), Some(reason), fetched_at));
+    }
+
+    if age <= stale_seconds {
+        return Ok(state("ok", windows, None, fetched_at));
+    }
+
+    let reason = match failure {
+        Some(reason) => format!("{reason}; показаны данные {} назад", humanize_age(age)),
+        None => format!("данные Claude обновлялись {} назад", humanize_age(age)),
+    };
+    Ok(state("stale", windows, Some(reason), fetched_at))
+}
+
+/// Выбирает, что показать вместо живого ответа.
+///
+/// Источников два — наш кеш и кеш Claude Code, — и выигрывает тот, что свежее:
+/// Claude Code обновляет свой только при запуске, но после долгого простоя
+/// сервиса именно он и окажется новее.
+///
+/// Окна, чей период уже закончился, отбрасываются: показывать использование
+/// прошлого периода — врать, а считать его сброшенным — гадать. Пустой список
+/// на выходе означает «данные есть, но все протухли», и это не то же самое, что
+/// «данных нет вовсе».
+fn choose_fallback(
+    own: Option<(Vec<QuotaWindow>, i64)>,
+    claude_code: Option<(Vec<QuotaWindow>, i64)>,
+    now: i64,
+) -> Option<(Vec<QuotaWindow>, i64)> {
+    let (windows, fetched_at) = [own, claude_code]
+        .into_iter()
+        .flatten()
+        .max_by_key(|(_, fetched_at)| *fetched_at)?;
+    let current = windows
+        .into_iter()
+        .filter(|window| window.resets_at.is_none_or(|resets_at| resets_at > now))
+        .collect();
+    Some((current, fetched_at))
+}
+
+fn backoff_seconds(failures: u32) -> i64 {
+    let shift = failures.saturating_sub(1).min(8);
+    (MIN_POLL_SECONDS.saturating_mul(1 << shift)).min(BACKOFF_MAX_SECONDS)
+}
+
+fn humanize_age(seconds: i64) -> String {
+    let minutes = seconds / 60;
+    match minutes {
+        ..=0 => "меньше минуты".to_owned(),
+        1..=59 => format!("{minutes} мин"),
+        _ => format!("{} ч {} мин", minutes / 60, minutes % 60),
+    }
+}
+
+/// Ошибка живого запроса. `rate_limited` отделяет «нас попросили подождать» от
+/// «что-то сломалось»: пауза у этих случаев разная.
+struct LiveError {
+    message: String,
+    rate_limited: bool,
+}
+
+impl LiveError {
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            rate_limited: false,
         }
     }
 }
 
 /// Запрашивает актуальные лимиты у Anthropic. Ошибка означает «нужен запасной
 /// источник», а не отказ провайдера.
-async fn live_usage(config_dir: &Path, now: i64) -> Result<Vec<QuotaWindow>> {
+async fn live_usage(config_dir: &Path, now: i64) -> Result<Vec<QuotaWindow>, LiveError> {
     let Some(credentials) = read_token(config_dir) else {
-        bail!("Выполни вход: claude");
+        return Err(LiveError::plain("Выполни вход: claude"));
     };
     if let Some(expires_at) = credentials.expires_at {
         // expiresAt в миллисекундах; запас в минуту, чтобы не ловить гонку.
         if expires_at / 1000 <= now + 60 {
-            bail!("Токен Claude истёк — запусти Claude Code, он обновит его сам");
+            return Err(LiveError::plain(
+                "Токен Claude истёк — запусти Claude Code, он обновит его сам",
+            ));
         }
     }
 
@@ -432,18 +600,27 @@ async fn live_usage(config_dir: &Path, now: i64) -> Result<Vec<QuotaWindow>> {
         .header("anthropic-beta", OAUTH_BETA)
         .send()
         .await
-        .context("Не удалось связаться с Anthropic")?;
+        .map_err(|_| LiveError::plain("Не удалось связаться с Anthropic"))?;
 
     let status = response.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(LiveError {
+            message: "Anthropic ограничил частоту запросов".to_owned(),
+            rate_limited: true,
+        });
+    }
     if !status.is_success() {
         // Тело не показываем: оно может содержать детали аккаунта.
-        bail!("Anthropic вернул HTTP {status}");
+        return Err(LiveError::plain(format!("Anthropic вернул HTTP {status}")));
     }
 
-    let body = response.text().await.context("Пустой ответ Anthropic")?;
-    let windows = windows_from_usage(&body)?;
+    let body = response
+        .text()
+        .await
+        .map_err(|_| LiveError::plain("Пустой ответ Anthropic"))?;
+    let windows = windows_from_usage(&body).map_err(|error| LiveError::plain(error.to_string()))?;
     if windows.is_empty() {
-        bail!("Anthropic не вернул ни одного лимита");
+        return Err(LiveError::plain("Anthropic не вернул ни одного лимита"));
     }
     Ok(windows)
 }
@@ -671,6 +848,128 @@ mod tests {
         assert_eq!(fetched_at, 1_785_144_456);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn window(key: &str, percent: f64, resets_at: Option<i64>) -> QuotaWindow {
+        QuotaWindow::new(key, key, percent, Some(FIVE_HOUR_MINS), resets_at)
+    }
+
+    #[test]
+    fn the_pause_after_a_rate_limit_grows_and_stops_growing() {
+        assert_eq!(backoff_seconds(1), MIN_POLL_SECONDS);
+        assert_eq!(backoff_seconds(2), 2 * MIN_POLL_SECONDS);
+        assert_eq!(backoff_seconds(3), 4 * MIN_POLL_SECONDS);
+        assert_eq!(backoff_seconds(4), 8 * MIN_POLL_SECONDS);
+        assert_eq!(backoff_seconds(5), BACKOFF_MAX_SECONDS);
+        // Счётчик отказов растёт, пока endpoint молчит; час — потолок, и сдвиг
+        // на 30 позиций не должен обнулять его переполнением.
+        assert_eq!(backoff_seconds(100), BACKOFF_MAX_SECONDS);
+        assert_eq!(backoff_seconds(u32::MAX), BACKOFF_MAX_SECONDS);
+    }
+
+    #[test]
+    fn the_freshest_source_wins() {
+        let mine = vec![window("session", 10.0, Some(2_000))];
+        let theirs = vec![window("session", 90.0, Some(2_000))];
+
+        let (windows, at) = choose_fallback(
+            Some((mine.clone(), 500)),
+            Some((theirs.clone(), 900)),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(at, 900);
+        assert_eq!(windows[0].used_percent, 90.0);
+
+        let (windows, at) = choose_fallback(Some((mine, 900)), Some((theirs, 500)), 1_000).unwrap();
+        assert_eq!(at, 900);
+        assert_eq!(windows[0].used_percent, 10.0);
+    }
+
+    #[test]
+    fn a_window_whose_period_ended_is_dropped_rather_than_guessed() {
+        let windows = vec![
+            window("session", 97.0, Some(900)),
+            window("weekly_all", 62.0, Some(5_000)),
+            window("no_reset", 5.0, None),
+        ];
+
+        let (current, _) = choose_fallback(Some((windows, 100)), None, 1_000).unwrap();
+        assert_eq!(keys(&current), ["weekly_all", "no_reset"]);
+    }
+
+    #[test]
+    fn every_window_expired_is_not_the_same_as_no_data() {
+        let windows = vec![window("session", 97.0, Some(900))];
+        let (current, at) = choose_fallback(Some((windows, 100)), None, 1_000).unwrap();
+        assert!(current.is_empty(), "истёкшее окно показывать нечего");
+        assert_eq!(at, 100, "возраст данных при этом известен");
+
+        assert!(
+            choose_fallback(None, None, 1_000).is_none(),
+            "источников нет вовсе — это другое состояние"
+        );
+    }
+
+    #[test]
+    fn the_cache_survives_a_restart_and_a_damaged_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "ai-usage-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude-usage-main.json");
+
+        let cache = UsageCache {
+            fetched_at: 1_785_000_000,
+            next_attempt_at: 1_785_000_300,
+            failures: 2,
+            windows: vec![window("session", 42.0, Some(1_785_010_000))],
+        };
+        write_usage_cache(&path, &cache);
+
+        let read = read_usage_cache(&path);
+        assert_eq!(read.fetched_at, 1_785_000_000);
+        assert_eq!(read.next_attempt_at, 1_785_000_300);
+        assert_eq!(read.failures, 2);
+        assert_eq!(read.windows[0].used_percent, 42.0);
+
+        // Кеш лежит в runtime-каталоге; чужим глазам он не нужен.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "кеш не должен быть доступен всем");
+        }
+
+        fs::write(&path, "{ это не json").unwrap();
+        let broken = read_usage_cache(&path);
+        assert_eq!(broken.next_attempt_at, 0, "битый кеш не блокирует запрос");
+        assert!(broken.windows.is_empty());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_age_of_the_data_reads_like_a_sentence() {
+        assert_eq!(humanize_age(0), "меньше минуты");
+        assert_eq!(humanize_age(-5), "меньше минуты");
+        assert_eq!(humanize_age(59), "меньше минуты");
+        assert_eq!(humanize_age(60), "1 мин");
+        assert_eq!(humanize_age(3_540), "59 мин");
+        assert_eq!(humanize_age(3_600), "1 ч 0 мин");
+        assert_eq!(humanize_age(19_860), "5 ч 31 мин");
+    }
+
+    #[test]
+    fn the_cache_file_name_cannot_escape_the_runtime_directory() {
+        let path = usage_cache_path("../../etc/passwd");
+        assert_eq!(path.parent(), Some(crate::util::runtime_dir().as_path()));
+        assert_eq!(
+            path.file_name().unwrap(),
+            "claude-usage-______etc_passwd.json"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # AI Usage for GNOME — handoff
 
 > Актуальность: **27 июля 2026 года**  
-> Стадия: **Backend принят на реальной системе; остался рендеринг расширения в GNOME Shell и публикация релиза**.
+> Стадия: **Backend и панель приняты на реальной системе; осталась публикация релиза**.
 
 Этот файл — короткая точка входа для разработчика или следующей модели. Не загружай всю документацию сразу: открой только файл, связанный с текущей задачей.
 
@@ -13,7 +13,9 @@ AI Usage for GNOME показывает в верхней панели GNOME с�
 
 ## Состояние одним абзацем
 
-Rust CLI/daemon, три provider-адаптера, multi-account конфиг, Claude status-line hook, GNOME-индикатор, rootless install/uninstall, systemd user-service и GitHub Actions реализованы и собираются. На Bluefin 44 / GNOME Shell 50.3 проверены живьём: Codex handshake на реальном аккаунте и на втором независимом `CODEX_HOME`, Claude status-line hook и его обратимое удаление, rootless install/uninstall/reinstall, `secrets.env` с правами 600, last-known-good при сбое провайдера. 85 автотестов на фикстурах реальных ответов. **Расширение ещё ни разу не отрисовывалось в GNOME Shell: на Wayland Shell не видит новый каталог расширений до перезахода в сессию. Релиз не публиковался, DeepSeek на живом ключе не проверялся.** До этих двух проверок продукт нельзя называть production-ready.
+Rust CLI/daemon, три provider-адаптера, multi-account конфиг, Claude status-line hook, GNOME-индикатор, rootless install/uninstall, systemd user-service и GitHub Actions реализованы и собираются. На Bluefin 44 / GNOME Shell 50.3 проверены живьём: Codex handshake на реальном аккаунте и на втором независимом `CODEX_HOME`, активный опрос лимитов Claude и его поведение под `429`, живой ключ DeepSeek, rootless install/uninstall/reinstall, `secrets.env` с правами 600, last-known-good при сбое провайдера. Панель и меню отрисованы в настоящей сессии со всеми тремя аккаунтами. 110 автотестов на фикстурах реальных ответов. **Релиз не публиковался.** До этого продукт нельзя называть production-ready.
+
+**Особенность разработки:** на Wayland GNOME Shell продолжает исполнять ранее загруженную копию расширения — `ReloadExtension` в D-Bus объявлен, но вне режима разработчика не реализован. Любая правка `extension.js` или `stylesheet.css` видна только после перезахода в сессию.
 
 ## Куда идти за деталями
 
@@ -30,12 +32,10 @@ Rust CLI/daemon, три provider-адаптера, multi-account конфиг, C
 
 ## Рекомендуемый следующий шаг
 
-1. Выйти из сессии GNOME и войти снова, затем `gnome-extensions enable ai-usage@netherguy4`.
-2. Пройти чек-лист «P0: GNOME/Bluefin integration» в [`TESTING.md`](docs/handoff/TESTING.md) и записать результат туда же.
-3. Проверить автозапуск user-service после reboot.
-4. Прогнать `release.yml` через `workflow_dispatch`, проверить оба архива.
-5. Выпустить `v0.1.0-rc.1`, проверить `SHA256SUMS` и `install-online.sh` на чистом профиле.
-6. Только после зелёной матрицы — тег `v0.1.0`.
+1. Доделать остаток чек-листа «P0: GNOME/Bluefin integration» в [`TESTING.md`](docs/handoff/TESTING.md): 0 и 1 аккаунт, длинные строки, многократные enable/disable.
+2. Прогнать `release.yml` через `workflow_dispatch`, проверить оба архива.
+3. Выпустить `v0.1.0-rc.1`, проверить `SHA256SUMS` и `install-online.sh` на чистом профиле.
+4. Только после зелёной матрицы — тег `v0.1.0`.
 
 Подробная матрица — в [`TESTING.md`](docs/handoff/TESTING.md).
 

@@ -292,7 +292,10 @@ mod tests {
         "#;
         let config: Config = toml::from_str(raw).unwrap();
         assert_eq!(config.refresh_seconds, 120);
-        assert_eq!(config.stale_seconds, 86_400);
+        assert_eq!(
+            config.stale_seconds,
+            crate::providers::claude::DEFAULT_STALE_SECONDS
+        );
         match &config.accounts[0] {
             AccountConfig::Codex {
                 command, limit_id, ..

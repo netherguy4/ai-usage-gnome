@@ -157,7 +157,19 @@ CODEX_HOME="$HOME/.codex-profile" codex app-server
 
 ### Claude waiting/stale
 
-Запустить Claude Code с правильным `CLAUDE_CONFIG_DIR`, выполнить один запрос и проверить cache в `~/.local/share/ai-usage/claude/`.
+Сначала `ai-usage doctor`: он скажет, есть ли вход и сколько живёт токен. Дальше по тексту ошибки в меню:
+
+- **«Anthropic ограничил частоту запросов»** — endpoint отвечает `429`. Ждать: пауза растёт до часа и снимается первым успехом. Бюджет общий с самим Claude Code, так что при активной работе в нём это ожидаемо.
+- **«Токен Claude истёк»** — обновить его может только сам Claude Code; достаточно его запустить.
+- **«Выполни вход: claude»** — в `<config_dir>/.credentials.json` нет OAuth-записи.
+
+Кеш последнего удачного ответа лежит в `$XDG_RUNTIME_DIR/ai-usage/claude-usage-<id>.json`. Там же хранится момент следующей попытки: удалить файл — значит разрешить запрос немедленно.
+
+Проверить, что происходит на самом деле, можно так (токен в вывод не попадает):
+
+```bash
+ai-usage once | jq '.accounts[] | select(.provider=="claude") | {status, error, updated_at}'
+```
 
 ### DeepSeek key не найден
 

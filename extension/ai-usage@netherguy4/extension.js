@@ -132,7 +132,7 @@ export default class AiUsageExtension extends Extension {
             const stale = account.status === 'stale';
 
             for (const window of windows)
-                this._addItem(formatWindow(window));
+                this._addItem(formatWindow(window, !stale));
             for (const balance of balances)
                 this._addItem(`Баланс: ${formatMoney(balance.total, balance.currency)}`);
 
@@ -222,14 +222,14 @@ export default class AiUsageExtension extends Extension {
 // В остальном показывается пятичасовое окно, а при его отсутствии (Codex plus)
 // — недельное. windows отсортированы по длительности и ключу, поэтому первое
 // совпадение по длительности — самое общее окно.
-function panelWindow(windows) {
+function panelWindow(windows, fresh) {
     if (!windows.length)
         return null;
 
     const general = windows.filter(w => !w.scope);
     const pool = general.length ? general : windows;
 
-    const blocked = pool.find(w => effectiveRemaining(w) <= 0);
+    const blocked = pool.find(w => effectiveRemaining(w, fresh) <= 0);
     if (blocked)
         return blocked;
 
@@ -241,23 +241,26 @@ function panelWindow(windows) {
 // Текст рядом со значком провайдера в панели.
 function panelText(windows, balances, stale) {
     const mark = stale ? '~' : '';
-    const headline = panelWindow(windows);
+    const headline = panelWindow(windows, !stale);
     if (headline)
-        return `${Math.round(effectiveRemaining(headline))}%${mark}`;
+        return `${Math.round(effectiveRemaining(headline, !stale))}%${mark}`;
     // У провайдера может не быть лимитов вовсе — только баланс.
     if (balances.length)
         return `${formatMoney(balances[0].total, balances[0].currency)}${mark}`;
     return '!';
 }
 
-function effectiveRemaining(window) {
-    if (window.resets_at && Number(window.resets_at) <= Math.floor(Date.now() / 1000))
+// Наступивший `resets_at` и означает, что окно началось заново — по свежим
+// данным это факт, а не догадка. По устаревшим верить ему нельзя: там мог
+// смениться и сам момент сброса, поэтому показываем последнее известное число.
+function effectiveRemaining(window, fresh) {
+    if (fresh && window.resets_at && Number(window.resets_at) <= Math.floor(Date.now() / 1000))
         return 100;
     return Math.max(0, Math.min(100, Number(window.remaining_percent) || 0));
 }
 
-function formatWindow(window) {
-    const remaining = effectiveRemaining(window);
+function formatWindow(window, fresh) {
+    const remaining = effectiveRemaining(window, fresh);
     const reset = formatReset(window.resets_at);
     const label = window.label || window.key || 'Лимит';
     return `${label}: ${Math.round(remaining)}% осталось${reset ? ` · ${reset}` : ''}`;
@@ -266,9 +269,10 @@ function formatWindow(window) {
 function formatReset(timestamp) {
     if (!timestamp)
         return '';
-    const seconds = Math.max(0, Number(timestamp) - Math.floor(Date.now() / 1000));
+    const seconds = Number(timestamp) - Math.floor(Date.now() / 1000);
+    // Момент сброса прошёл — когда наступит следующий, мы ещё не знаем.
     if (seconds <= 0)
-        return 'сброс сейчас';
+        return '';
     const days = Math.floor(seconds / 86400);
     const hours = Math.floor((seconds % 86400) / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
