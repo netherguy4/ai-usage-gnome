@@ -147,11 +147,15 @@ Extension:
 ~/.config/ai-usage/config.toml
 ~/.config/ai-usage/secrets.env
 ~/.config/systemd/user/ai-usage.service
+~/.config/ai-usage/hooks/agy-<account>.sh
 $XDG_RUNTIME_DIR/ai-usage/state.json
 $XDG_RUNTIME_DIR/ai-usage/claude-usage-<account>.json
+~/.local/state/ai-usage/antigravity-usage-<account>.json
 ```
 
 Все пути должны уважать XDG environment variables.
+
+`$XDG_RUNTIME_DIR` лежит на tmpfs, поэтому туда попадает только то, что демон умеет восстановить сам: `state.json` он переписывает каждый цикл, а `claude-usage-*` — обычный кеш поверх сетевого запроса. Снимок Antigravity восстановить некому — его присылает `agy` и только пока запущен, — поэтому он живёт в `$XDG_STATE_HOME`.
 
 ## Безопасность и приватность
 
