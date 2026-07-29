@@ -13,12 +13,25 @@
 agy
   └─ JSON stdin → ai-usage agy-hook --account <id>
                     └─ atomic 0600 snapshot
-                         $XDG_RUNTIME_DIR/ai-usage/antigravity-usage-<id>.json
+                         ~/.local/state/ai-usage/antigravity-usage-<id>.json
                               └─ daemon provider fetch
                                    └─ state.json → GNOME extension
 ```
 
 Hook сохраняет только `email`, `plan_tier`, активную модель, quota windows, reset timestamps и время обновления. Полный payload и credentials не сохраняются.
+
+**Снимок лежит вне tmpfs**, в отличие от кеша остальных провайдеров. Для Claude, Codex и DeepSeek `$XDG_RUNTIME_DIR` правилен: демон восполняет данные сам. Здесь единственный источник — `agy`, и на tmpfs квота пропадала бы при каждой перезагрузке; аккаунт возвращался бы в `waiting` с просьбой заново подключить hook, хотя hook на месте, а цифры не изменились. Снимок из старого расположения переносится автоматически при первом опросе.
+
+## Почему только hook
+
+Забрать квоту в обход status line нечем:
+
+- у `agy` нет подкоманды `usage`/`quota` — это slash-команды внутри TUI;
+- локальный language server (`RetrieveUserQuotaSummary`) поднимается и умирает вместе с `agy`, адрес и CSRF-токен передаются его дочерним процессам через окружение; постоянного endpoint нет;
+- прямой вызов Google backend потребовал бы OAuth-токен из keyring — это ровно та граница, которую провайдер не переходит;
+- `agy --print` квоту действительно обновляет, но заводит настоящую беседу и тратит квоту ради того, чтобы её прочитать.
+
+Поэтому цифры обновляются тогда, когда пользователь работает в `agy`, — и этого достаточно: пока `agy` закрыт, квота не расходуется.
 
 ## Настройка
 

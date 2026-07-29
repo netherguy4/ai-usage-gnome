@@ -48,7 +48,14 @@ struct Snapshot {
     updated_at: i64,
 }
 
+/// Снимок живёт вне tmpfs: `agy` — единственный источник этих цифр, и после
+/// перезагрузки восстановить их некому, пока пользователь снова не откроет CLI.
 pub fn snapshot_path(account_id: &str) -> PathBuf {
+    crate::util::persistent_state_dir().join(format!("antigravity-usage-{account_id}.json"))
+}
+
+/// Путь, по которому снимок лежал до переезда на постоянный каталог.
+fn legacy_snapshot_path(account_id: &str) -> PathBuf {
     crate::util::runtime_dir().join(format!("antigravity-usage-{account_id}.json"))
 }
 
@@ -103,6 +110,7 @@ pub fn status_line_from_payload(account_id: &str, raw: &str) -> Result<String> {
 
 pub async fn fetch(id: &str, name: &str, stale_seconds: i64) -> Result<AccountState> {
     let path = snapshot_path(id);
+    adopt_legacy_snapshot(id, &path);
     if !path.exists() {
         let mut state = AccountState::error(
             id,
@@ -141,6 +149,27 @@ pub async fn fetch(id: &str, name: &str, stale_seconds: i64) -> Result<AccountSt
         }),
         updated_at: snapshot.updated_at,
     })
+}
+
+/// Переносит снимок из tmpfs, если он остался там от прошлой версии.
+///
+/// Без этого обновление на живой сессии стоило бы пользователю ещё одного
+/// «открой agy», хотя данные никуда не делись. Молча: снимок восстановим, и
+/// срывать из-за него обновление аккаунта незачем.
+fn adopt_legacy_snapshot(account_id: &str, path: &PathBuf) {
+    if path.exists() {
+        return;
+    }
+    let legacy = legacy_snapshot_path(account_id);
+    if legacy == *path || !legacy.exists() {
+        return;
+    }
+    let Ok(bytes) = fs::read(&legacy) else {
+        return;
+    };
+    if crate::util::atomic_write_mode(path, &bytes, Some(0o600)).is_ok() {
+        let _ = fs::remove_file(&legacy);
+    }
 }
 
 /// Через сколько снимок `agy` перестаёт что-либо значить.
@@ -474,6 +503,38 @@ mod tests {
       "plan_tier": "Google AI Pro",
       "email": "developer@example.com"
     }"#;
+
+    /// `agy` — единственный источник этих цифр. Снимок на tmpfs означал бы
+    /// «открой agy» после каждой перезагрузки, хотя квота никуда не делась.
+    #[test]
+    fn the_snapshot_does_not_live_on_tmpfs() {
+        let path = snapshot_path("agy-main");
+        assert_ne!(path, legacy_snapshot_path("agy-main"));
+        assert!(
+            !path.starts_with(crate::util::runtime_dir()),
+            "снимок оказался в runtime-каталоге: {}",
+            path.display()
+        );
+        assert!(path.ends_with("antigravity-usage-agy-main.json"));
+    }
+
+    #[test]
+    fn a_snapshot_left_in_the_runtime_dir_is_adopted() {
+        let legacy = legacy_snapshot_path("adopt-test");
+        let target = std::env::temp_dir().join(format!(
+            "ai-usage-adopt-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&target);
+        crate::util::atomic_write_mode(&legacy, b"{\"windows\":[]}", Some(0o600)).unwrap();
+
+        adopt_legacy_snapshot("adopt-test", &target);
+
+        assert!(target.exists(), "снимок не переехал");
+        assert!(!legacy.exists(), "старая копия осталась на tmpfs");
+        let _ = fs::remove_file(&target);
+    }
 
     fn window<'a>(snapshot: &'a Snapshot, key: &str) -> &'a QuotaWindow {
         snapshot

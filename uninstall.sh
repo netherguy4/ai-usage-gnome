@@ -22,6 +22,7 @@ EXT_DIR="$DATA_HOME/gnome-shell/extensions/$UUID"
 SERVICE="$CONFIG_HOME/systemd/user/ai-usage.service"
 CONFIG_DIR="$CONFIG_HOME/ai-usage"
 CACHE_DIR="$DATA_HOME/ai-usage"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ai-usage"
 
 if [[ -x "$BINARY" ]]; then
   "$BINARY" restore-claude-hooks || echo "Warning: Claude hooks could not be restored." >&2
@@ -34,7 +35,7 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl --user disable --now ai-usage.service 2>/dev/null || true
 fi
 
-rm -rf "$EXT_DIR" "$CACHE_DIR"
+rm -rf "$EXT_DIR" "$CACHE_DIR" "$STATE_DIR"
 rm -f "$SERVICE" "$BINARY" "$BIN_DIR/ai-usage-uninstall"
 if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
   rm -rf "$XDG_RUNTIME_DIR/ai-usage"

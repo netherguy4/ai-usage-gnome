@@ -39,6 +39,18 @@ pub fn state_file() -> PathBuf {
     runtime_dir().join("state.json")
 }
 
+/// Каталог для данных, которые обязаны пережить перезагрузку.
+///
+/// `runtime_dir()` лежит на tmpfs: для Claude, Codex и DeepSeek это и правильно
+/// — там кеш, который демон восполняет сам. Провайдеру, чей единственный
+/// источник данных снаружи (`agy` присылает квоту сам и только пока запущен),
+/// такой каталог означает потерю данных при каждой перезагрузке.
+pub fn persistent_state_dir() -> PathBuf {
+    dirs::state_dir()
+        .map(|dir| dir.join("ai-usage"))
+        .unwrap_or_else(runtime_dir)
+}
+
 pub fn secrets_file() -> Result<PathBuf> {
     let base = dirs::config_dir().context("Не удалось определить каталог конфигурации")?;
     Ok(base.join("ai-usage").join("secrets.env"))
