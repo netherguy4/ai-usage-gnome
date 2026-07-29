@@ -60,28 +60,37 @@ pub enum AccountConfig {
         #[serde(default = "default_deepseek_base_url")]
         base_url: String,
     },
+    Antigravity {
+        id: String,
+        name: String,
+    },
 }
 
 impl AccountConfig {
     pub fn id(&self) -> &str {
         match self {
-            Self::Claude { id, .. } | Self::Codex { id, .. } | Self::Deepseek { id, .. } => id,
+            Self::Claude { id, .. }
+            | Self::Codex { id, .. }
+            | Self::Deepseek { id, .. }
+            | Self::Antigravity { id, .. } => id,
         }
     }
 
     pub fn name(&self) -> &str {
         match self {
-            Self::Claude { name, .. } | Self::Codex { name, .. } | Self::Deepseek { name, .. } => {
-                name
-            }
+            Self::Claude { name, .. }
+            | Self::Codex { name, .. }
+            | Self::Deepseek { name, .. }
+            | Self::Antigravity { name, .. } => name,
         }
     }
 
     pub fn set_name(&mut self, value: String) {
         match self {
-            Self::Claude { name, .. } | Self::Codex { name, .. } | Self::Deepseek { name, .. } => {
-                *name = value
-            }
+            Self::Claude { name, .. }
+            | Self::Codex { name, .. }
+            | Self::Deepseek { name, .. }
+            | Self::Antigravity { name, .. } => *name = value,
         }
     }
 
@@ -90,6 +99,7 @@ impl AccountConfig {
             Self::Claude { .. } => "claude",
             Self::Codex { .. } => "codex",
             Self::Deepseek { .. } => "deepseek",
+            Self::Antigravity { .. } => "antigravity",
         }
     }
 
@@ -100,7 +110,7 @@ impl AccountConfig {
         match self {
             Self::Claude { config_dir, .. } => Some(config_dir),
             Self::Codex { codex_home, .. } => Some(codex_home),
-            Self::Deepseek { .. } => None,
+            Self::Deepseek { .. } | Self::Antigravity { .. } => None,
         }
     }
 }
@@ -237,6 +247,13 @@ mod tests {
         }
     }
 
+    fn antigravity(id: &str) -> AccountConfig {
+        AccountConfig::Antigravity {
+            id: id.to_owned(),
+            name: id.to_owned(),
+        }
+    }
+
     #[test]
     fn round_trips_every_provider_through_toml() {
         let config = Config {
@@ -251,13 +268,14 @@ mod tests {
                     api_key_env: "AI_USAGE_DEEPSEEK_DEEPSEEK_MAIN".to_owned(),
                     base_url: "https://api.deepseek.com".to_owned(),
                 },
+                antigravity("agy-main"),
             ],
         };
 
         let raw = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&raw).unwrap();
 
-        assert_eq!(parsed.accounts.len(), 3);
+        assert_eq!(parsed.accounts.len(), 4);
         assert_eq!(parsed.refresh_seconds, 60);
         assert_eq!(parsed.stale_seconds, 3_600);
         assert_eq!(
@@ -266,7 +284,7 @@ mod tests {
                 .iter()
                 .map(AccountConfig::provider)
                 .collect::<Vec<_>>(),
-            ["claude", "codex", "deepseek"]
+            ["claude", "codex", "deepseek", "antigravity"]
         );
         validate(&parsed).unwrap();
     }
@@ -278,7 +296,7 @@ mod tests {
         let raw = include_str!("../config/config.example.toml");
         let config: Config = toml::from_str(raw).unwrap();
         validate(&config).unwrap();
-        assert_eq!(config.accounts.len(), 4);
+        assert_eq!(config.accounts.len(), 5);
     }
 
     #[test]
@@ -371,6 +389,15 @@ mod tests {
         // Каталоги монопольны в пределах одного провайдера, а не глобально.
         let config = Config {
             accounts: vec![claude("c", "~/.shared"), codex("x", "~/.shared")],
+            ..Config::default()
+        };
+        validate(&config).unwrap();
+    }
+
+    #[test]
+    fn antigravity_accounts_need_only_unique_ids() {
+        let config = Config {
+            accounts: vec![antigravity("agy-main"), antigravity("agy-work")],
             ..Config::default()
         };
         validate(&config).unwrap();
