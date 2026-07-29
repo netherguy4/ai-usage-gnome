@@ -127,10 +127,7 @@ pub async fn fetch(id: &str, name: &str, stale_seconds: i64) -> Result<AccountSt
         name: name.to_owned(),
         provider: "antigravity".to_owned(),
         status: if stale { "stale" } else { "ok" }.to_owned(),
-        plan: snapshot
-            .plan
-            .as_deref()
-            .map(crate::util::humanize_plan),
+        plan: snapshot.plan.as_deref().map(crate::util::humanize_plan),
         email: snapshot.email,
         model: snapshot.model,
         windows: snapshot.windows,
@@ -175,9 +172,7 @@ fn snapshot_from_payload(raw: &str, now: i64) -> Result<Option<Snapshot>> {
 
     Ok(Some(Snapshot {
         email: payload.email.filter(|value| !value.trim().is_empty()),
-        plan: payload
-            .plan_tier
-            .filter(|value| !value.trim().is_empty()),
+        plan: payload.plan_tier.filter(|value| !value.trim().is_empty()),
         model,
         windows,
         updated_at: now,
@@ -333,10 +328,7 @@ mod tests {
         let snapshot = snapshot_from_payload(SAMPLE, 1_000).unwrap().unwrap();
         assert_eq!(snapshot.email.as_deref(), Some("developer@example.com"));
         assert_eq!(snapshot.plan.as_deref(), Some("Pro"));
-        assert_eq!(
-            snapshot.model.as_deref(),
-            Some("Gemini 3.5 Flash (High)")
-        );
+        assert_eq!(snapshot.model.as_deref(), Some("Gemini 3.5 Flash (High)"));
         assert_eq!(snapshot.windows.len(), 3);
         assert_eq!(snapshot.windows[0].key, "gemini-weekly");
         assert_eq!(snapshot.windows[0].remaining_percent.round(), 94.0);
@@ -365,8 +357,7 @@ mod tests {
 
     #[test]
     fn empty_quota_does_not_overwrite_last_good_snapshot() {
-        let result = snapshot_from_payload(r#"{"quota": {}, "plan_tier": "Pro"}"#, 1_000)
-            .unwrap();
+        let result = snapshot_from_payload(r#"{"quota": {}, "plan_tier": "Pro"}"#, 1_000).unwrap();
         assert!(result.is_none());
     }
 

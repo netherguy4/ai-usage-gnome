@@ -189,9 +189,11 @@ fn account(command: AccountCommand) -> Result<()> {
                         ..
                     } => format!("{}, bucket {limit_id}", codex_home.display()),
                     AccountConfig::Deepseek { api_key_env, .. } => api_key_env.clone(),
-                    AccountConfig::Antigravity { id, .. } => providers::antigravity::snapshot_path(id)
-                        .display()
-                        .to_string(),
+                    AccountConfig::Antigravity { id, .. } => {
+                        providers::antigravity::snapshot_path(id)
+                            .display()
+                            .to_string()
+                    }
                 };
                 println!(
                     "{:<16} {:<12} {:<20} {}",
@@ -380,9 +382,7 @@ fn build_account(command: AddCommand) -> Result<Added> {
             util::validate_id(&common.id)?;
             Ok(Added {
                 account: AccountConfig::Antigravity {
-                    name: common
-                        .name
-                        .unwrap_or_else(|| "Google AI Pro".to_owned()),
+                    name: common.name.unwrap_or_else(|| "Google AI Pro".to_owned()),
                     id: common.id,
                 },
                 install_hook: hook,
@@ -604,7 +604,11 @@ fn doctor() -> Result<()> {
                     "{} Antigravity '{}': agy={}, snapshot={}, hook={}",
                     mark(agy && snapshot.exists()),
                     name,
-                    if agy { "найден" } else { "не найден" },
+                    if agy {
+                        "найден"
+                    } else {
+                        "не найден"
+                    },
                     snapshot.display(),
                     hook.display()
                 );
