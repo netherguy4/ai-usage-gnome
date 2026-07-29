@@ -29,3 +29,8 @@ id = "deepseek-main"
 name = "DeepSeek"
 api_key_env = "AI_USAGE_DEEPSEEK_DEEPSEEK_MAIN"
 base_url = "https://api.deepseek.com"
+
+[[accounts]]
+provider = "antigravity"
+id = "agy-main"
+name = "Google AI Pro"
