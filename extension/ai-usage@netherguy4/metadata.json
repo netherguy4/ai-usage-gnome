@@ -1,7 +1,7 @@
 {
   "uuid": "ai-usage@netherguy4",
   "name": "AI Usage",
-  "description": "Claude, Codex and DeepSeek usage in the GNOME top panel",
+  "description": "Claude, Codex, Antigravity and DeepSeek usage in the GNOME top panel",
   "shell-version": ["48", "49", "50"],
   "version-name": "0.1.0",
   "url": "https://github.com/netherguy4/ai-usage-gnome"

@@ -382,7 +382,9 @@ fn build_account(command: AddCommand) -> Result<Added> {
             util::validate_id(&common.id)?;
             Ok(Added {
                 account: AccountConfig::Antigravity {
-                    name: common.name.unwrap_or_else(|| "Google AI Pro".to_owned()),
+                    // Не «Google AI Pro»: это же значение приходит в
+                    // `plan_tier`, и заголовок меню читался бы дважды.
+                    name: common.name.unwrap_or_else(|| "Antigravity".to_owned()),
                     id: common.id,
                 },
                 install_hook: hook,

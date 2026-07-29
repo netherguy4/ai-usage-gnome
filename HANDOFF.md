@@ -1,7 +1,7 @@
 # AI Usage for GNOME — handoff
 
 > Актуальность: **29 июля 2026 года**  
-> Стадия: **Backend и панель приняты на реальной системе; Antigravity реализован и прошёл CI, но требует живого теста с `agy`; осталась публикация стабильного релиза**.
+> Стадия: **Backend и панель приняты на реальной системе, включая Antigravity на живом Google AI Pro; осталась публикация стабильного релиза**.
 
 Этот файл — короткая точка входа для разработчика или следующей модели. Не загружай всю документацию сразу: открой только файл, связанный с текущей задачей.
 
@@ -13,7 +13,7 @@ AI Usage for GNOME показывает в верхней панели GNOME с�
 
 ## Состояние одним абзацем
 
-Rust CLI/daemon, четыре provider-адаптера, multi-account config, Claude status-line hook, официальный `agy` status-line consumer, GNOME-индикатор, rootless install/uninstall, systemd user-service и GitHub Actions реализованы и собираются. На Bluefin 44 / GNOME Shell 50.3 проверены живьём: Codex handshake на реальном аккаунте и на втором независимом `CODEX_HOME`, активный опрос лимитов Claude и его поведение под `429`, живой ключ DeepSeek, rootless install/uninstall/reinstall, `secrets.env` с правами 600, last-known-good при сбое провайдера. Панель и меню отрисованы в настоящей сессии с Claude, Codex и DeepSeek. Antigravity использует официальный JSON status-line interface, не читает keyring/OAuth и прошёл CI на Rust 1.86; живой payload `agy` и рендер четвёртого провайдера ещё не проверены. 116 автотестов. **Стабильный релиз не публиковался.**
+Rust CLI/daemon, четыре provider-адаптера, multi-account config, Claude status-line hook, официальный `agy` status-line consumer, GNOME-индикатор, rootless install/uninstall, systemd user-service и GitHub Actions реализованы и собираются. На Bluefin 44 / GNOME Shell 50.3 проверены живьём: Codex handshake на реальном аккаунте и на втором независимом `CODEX_HOME`, активный опрос лимитов Claude и его поведение под `429`, живой ключ DeepSeek, rootless install/uninstall/reinstall, `secrets.env` с правами 600, last-known-good при сбое провайдера. Панель и меню отрисованы в настоящей сессии со всеми четырьмя аккаунтами. Antigravity использует официальный JSON status-line interface, не читает keyring/OAuth; живой payload снят с `agy` 1.1.8 на Google AI Pro и лёг в фикстуру тестов — он вскрыл два дефекта разметки квоты, которых придуманная фикстура не показывала (см. [`ANTIGRAVITY.md`](docs/handoff/ANTIGRAVITY.md)). 122 автотеста. **Стабильный релиз не публиковался.**
 
 **Особенность разработки:** на Wayland GNOME Shell продолжает исполнять ранее загруженную копию расширения — `ReloadExtension` в D-Bus объявлен, но вне режима разработчика не реализован. Любая правка `extension.js` или `stylesheet.css` видна только после перезахода в сессию.
 
@@ -33,7 +33,7 @@ Rust CLI/daemon, четыре provider-адаптера, multi-account config, C
 
 ## Рекомендуемый следующий шаг
 
-1. Принять Antigravity на живом Google AI Pro аккаунте по чек-листу в [`ANTIGRAVITY.md`](docs/handoff/ANTIGRAVITY.md).
+1. Проверить Antigravity на **реально исчерпанном** лимите: правило блокировки пока подтверждено только тестами (остаток чек-листа — в [`ANTIGRAVITY.md`](docs/handoff/ANTIGRAVITY.md)).
 2. Доделать остаток чек-листа «P0: GNOME/Bluefin integration» в [`TESTING.md`](docs/handoff/TESTING.md): 0 и 1 аккаунт, длинные строки, многократные enable/disable.
 3. Прогнать release workflow и проверить оба архива на текущем commit.
 4. Выпустить следующий release candidate, проверить `SHA256SUMS` и `install-online.sh` на чистом профиле.

@@ -23,8 +23,10 @@ Hook сохраняет только `email`, `plan_tier`, активную мо
 ## Настройка
 
 ```bash
-ai-usage account add antigravity --id agy-main --name "Google AI Pro" --hook
+ai-usage account add antigravity --id agy-main --hook
 ```
+
+То же есть в интерактивном `ai-usage setup` — пункт «4) Google Antigravity (agy)».
 
 Команда создаёт user-only wrapper в `~/.config/ai-usage/hooks/` и печатает команду, которую нужно выполнить внутри `agy`:
 
@@ -34,12 +36,58 @@ ai-usage account add antigravity --id agy-main --name "Google AI Pro" --hook
 
 Для совместного отображения со встроенной строкой `agy` используется `stack_with_default: true` в `~/.gemini/antigravity-cli/settings.json`.
 
+## Что реально присылает `agy`
+
+Payload, снятый с `agy` 1.1.8 на Google AI Pro 29 июля 2026 года (сокращённо):
+
+```json
+{
+  "model": {"id": "Gemini 3.6 Flash (High)", "display_name": "Gemini 3.6 Flash (High)", "effort": "high"},
+  "quota": {
+    "3p-5h":         {"remaining_fraction": 1, "reset_time": "2026-07-29T19:05:06Z", "reset_in_seconds": 17998},
+    "3p-weekly":     {"remaining_fraction": 1, "reset_time": "2026-08-05T14:05:06Z", "reset_in_seconds": 604798},
+    "gemini-5h":     {"remaining_fraction": 1, "reset_time": "2026-07-29T19:05:06Z", "reset_in_seconds": 17998},
+    "gemini-weekly": {"remaining_fraction": 1, "reset_time": "2026-08-05T14:05:06Z", "reset_in_seconds": 604798}
+  },
+  "plan_tier": "Google AI Pro",
+  "email": "…",
+  "version": "1.1.8",
+  "product": "antigravity"
+}
+```
+
+Зафиксированные факты:
+
+- **Четыре bucket-а: два семейства моделей (`gemini`, `3p`) по два окна (`5h`, `weekly`).**
+  Это и есть «разные виды лимитов»: у одного семейства одновременно живут
+  пятичасовое и недельное окно.
+- У bucket-а **всего три поля**: `remaining_fraction`, `reset_time`, `reset_in_seconds`.
+  Полей `window`, `display_name`, `description`, `disabled`, `remaining_amount` из
+  апстрим-протокола `RetrieveUserQuotaSummary` в status-line payload **нет** — `agy`
+  их не пробрасывает. Поэтому вид окна и подпись выводятся из имени ключа, и другого
+  источника не существует.
+- `plan_tier` приходит как `"Google AI Pro"`, поэтому имя аккаунта по умолчанию —
+  `Antigravity`, иначе заголовок меню читался бы дважды.
+- Hook вызывается многократно за сессию, на каждое изменение состояния агента.
+  Первые вызовы приходят **без** `quota` (`agent_state: authenticating`).
+
 ## Семантика квоты
 
 - Список bucket-ов открыт: незнакомые будущие ключи не теряются.
-- Для активной модели соответствующий pool сортируется первым и становится headline без `scope`.
-- Остальные model pools остаются scoped, поэтому исчерпанный неактивный pool не заставляет панель показывать общий `0%`.
-- `remaining_fraction` переводится в `remaining_percent`; `reset_in_seconds` — в абсолютный `resets_at`.
+- Ключ делится на семейство и окно (`gemini-5h` → семейство `gemini`, окно `5h`).
+  Ключ с незнакомым окончанием остаётся отдельным семейством целиком.
+- **Все окна активного семейства** становятся общими лимитами аккаунта (`scope: null`).
+  Исчерпанное недельное окно блокирует работу так же, как пятичасовое, поэтому
+  выделять «одно главное окно» нельзя.
+- Окна остальных семейств остаются scoped: там достаточно сменить модель, и панель
+  не обязана падать в `0%`.
+- Если активная модель неизвестна, общим не объявляется никто — панель тогда
+  покажет худшее окно, а не случайное.
+- Незнакомое семейство считается общим: пропустить блокирующий лимит хуже, чем
+  лишний раз показать `0%`.
+- `remaining_fraction` переводится в `remaining_percent`; `reset_in_seconds` — в
+  абсолютный `resets_at`, а при его отсутствии разбирается `reset_time` (RFC 3339).
+- Строка внутри `agy` показывает худшее из общих окон — то же число, что и панель.
 - Пустой payload квоты не перезаписывает последний удачный snapshot.
 
 ## Свежесть и ошибки
@@ -48,23 +96,30 @@ ai-usage account add antigravity --id agy-main --name "Google AI Pro" --hook
 
 ## Тестовое доказательство
 
-GitHub Actions CI run `30457571367` для commit `ec698d15c53db20275d4c475f4f65609e6bc5ee1`:
+**Живой прогон 29 июля 2026 года**, Bluefin 44 / GNOME Shell 50.3, `agy` 1.1.8,
+аккаунт Google AI Pro:
 
-- сборка на заявленном MSRV Rust 1.86 — успешно;
-- `cargo fmt --all -- --check` — успешно;
-- Clippy с `-D warnings` — успешно;
-- 116 Rust-тестов — успешно;
-- release build — успешно;
-- синтаксис GNOME extension — успешно;
-- ShellCheck установочных скриптов — успешно.
+- hook подключён через `statusLine` в `~/.gemini/antigravity-cli/settings.json`,
+  payload снят с реальной сессии (`agy --print`) и лёг в фикстуру `SAMPLE`;
+- snapshot записан с правами `600`, внутри только email, план, модель, окна и время;
+- демон прочитал snapshot без единого сетевого запроса;
+- все четыре bucket-а видны в меню с подписями и countdown-ом.
 
-Новые unit-тесты проверяют официальный payload, выбор Gemini/third-party pool по активной модели, сохранение неизвестного bucket-а, пустую квоту, ограничение процентов и отбрасывание non-finite значений.
+Первый прогон вскрыл два дефекта, которые CI пропустил, потому что фикстура была
+придуманной: подписи `Gemini 5h` / `3p 5h` (ключи с окном `5h` не были предусмотрены)
+и `scope: null` только у одного окна активного семейства. Оба исправлены.
+
+Unit-тесты (122 штуки) построены на живом payload и покрывают: разбор официального
+payload, «все окна активного семейства — общие», выбор семейства по активной модели,
+неизвестную модель, сохранение неизвестного bucket-а, запасной разбор `reset_time`,
+пустую квоту, ограничение процентов и отбрасывание non-finite значений.
 
 ## Что ещё проверить живьём
 
-- реальный payload текущей версии `agy` и фактические bucket keys на Google AI Pro;
-- вызов hook после `/usage` и `/quota`;
-- отображение плана, email, модели и reset countdown в GNOME Shell;
+- поведение при **реально исчерпанном** лимите: пока все окна на 100 %, правило
+  блокировки проверено только тестами;
+- вызов hook после `/usage` и `/quota` из интерактивного TUI (снятый payload получен
+  через `agy --print`);
 - stale-переход после закрытия `agy`;
 - поведение `stack_with_default` в пользовательской конфигурации;
 - два изолированных `agy`-профиля, если CLI поддерживает раздельные settings/session каталоги.

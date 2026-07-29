@@ -61,7 +61,7 @@ cd ai-usage-gnome
 ai-usage setup
 ```
 
-Он умеет добавлять или обновлять Claude, Codex и DeepSeek. Antigravity пока добавляется отдельной CLI-командой, потому что после неё нужно подключить hook внутри `agy`. Повторный ID заменяет существующую запись.
+Он умеет добавлять или обновлять Claude, Codex, DeepSeek и Antigravity. Повторный ID заменяет существующую запись.
 
 Те же действия без диалога — например, для скриптов и dotfiles:
 
@@ -69,7 +69,7 @@ ai-usage setup
 ai-usage account list
 ai-usage account add codex  --id codex-work --name "Codex Work" --codex-home ~/.codex-work
 ai-usage account add claude --id claude-main --config-dir ~/.claude
-ai-usage account add antigravity --id agy-main --name "Google AI Pro" --hook
+ai-usage account add antigravity --id agy-main --hook
 printf '%s' "$DEEPSEEK_KEY" | ai-usage account add deepseek --id ds --api-key-stdin
 ai-usage account rename codex-work "Codex рабочий"
 ai-usage account remove codex-work
@@ -99,7 +99,7 @@ journalctl --user -u ai-usage.service -f
 Добавь аккаунт и создай wrapper:
 
 ```bash
-ai-usage account add antigravity --id agy-main --name "Google AI Pro" --hook
+ai-usage account add antigravity --id agy-main --hook
 ```
 
 Команда напечатает путь вроде:
@@ -133,6 +133,15 @@ $XDG_RUNTIME_DIR/ai-usage/antigravity-usage-agy-main.json
 ```
 
 Если `agy` закрыт, сеть не опрашивается и snapshot не обновляется. После `stale_seconds` аккаунт получает `~` рядом с процентом и подсказку открыть `agy` или выполнить `/usage`. Неизвестные будущие пулы квоты сохраняются и появляются в меню без обновления приложения.
+
+**Какие лимиты приходят.** `agy` присылает четыре пула: два семейства моделей — Gemini и сторонние модели — и у каждого своё пятичасовое и недельное окно.
+
+```text
+Gemini · 5 часов              Сторонние модели · 5 часов
+Gemini · Неделя               Сторонние модели · Неделя
+```
+
+В панель выносится семейство активной модели, причём **оба** его окна считаются общими: исчерпанное недельное блокирует работу так же, как пятичасовое. Окна второго семейства видны в меню, но панель в `0%` не роняют — там достаточно сменить модель.
 
 ### Несколько Claude-аккаунтов
 
@@ -259,7 +268,7 @@ ai-usage restore-claude-hooks  восстановить Claude settings.json
 3. если у тарифа его нет — недельный или активный пул квоты;
 4. у провайдеров без лимитов, как DeepSeek, — баланс.
 
-Лимиты, привязанные к модели, из правила 1 исключены: исчерпанный лимит одной модели не блокирует работу, достаточно переключить модель. Antigravity помечает текущий quota-pool как активный, а остальные — как scoped. Именно поэтому панель не берёт минимум по всем окнам подряд.
+Лимиты, привязанные к модели, из правила 1 исключены: исчерпанный лимит одной модели не блокирует работу, достаточно переключить модель. У Antigravity общими считаются **все** окна того семейства моделей, которым `agy` пользуется сейчас, — и пятичасовое, и недельное; окна остальных семейств остаются scoped. Именно поэтому панель не берёт минимум по всем окнам подряд.
 
 Остальные лимиты видны в меню. Строки «обновлено» там нет: возраст появляется только когда данные устарели, вместе с причиной.
 
