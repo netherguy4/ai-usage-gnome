@@ -121,7 +121,7 @@ pub async fn fetch(id: &str, name: &str, stale_seconds: i64) -> Result<AccountSt
 
     let now = crate::util::unix_now();
     let age = now.saturating_sub(snapshot.updated_at).max(0);
-    let stale = age > stale_seconds;
+    let stale = age > stale_threshold(&snapshot.windows, stale_seconds);
 
     Ok(AccountState {
         id: id.to_owned(),
@@ -141,6 +141,28 @@ pub async fn fetch(id: &str, name: &str, stale_seconds: i64) -> Result<AccountSt
         }),
         updated_at: snapshot.updated_at,
     })
+}
+
+/// Через сколько снимок `agy` перестаёт что-либо значить.
+///
+/// Глобальный `stale_seconds` рассчитан на провайдеров, которых демон
+/// опрашивает сам: там пауза в опросе и правда означает «цифры могли уйти».
+/// С `agy` иначе — закрытый CLI квоту не тратит, а открытый сам дёргает hook,
+/// поэтому снимок остаётся точным всё окно, которое описывает. Порог в 15
+/// минут висел бы предупреждением почти всегда, ничего при этом не сообщая.
+///
+/// Отсчитываем от самого короткого окна: когда оно прожито целиком, данные
+/// заведомо описывают уже прошедший период. Глобальная настройка остаётся
+/// нижней границей, чтобы её нельзя было случайно ослабить.
+fn stale_threshold(windows: &[QuotaWindow], stale_seconds: i64) -> i64 {
+    windows
+        .iter()
+        .filter_map(|window| window.duration_mins)
+        .min()
+        .and_then(|mins| i64::try_from(mins).ok())
+        .map(|mins| mins.saturating_mul(60))
+        .unwrap_or(stale_seconds)
+        .max(stale_seconds)
 }
 
 fn snapshot_from_payload(raw: &str, now: i64) -> Result<Option<Snapshot>> {
@@ -575,6 +597,29 @@ mod tests {
         );
         assert_eq!(parse_rfc3339("не дата"), None);
         assert_eq!(parse_rfc3339("2026-13-01T00:00:00Z"), None);
+    }
+
+    /// Пятнадцать минут без `agy` — не повод для предупреждения: закрытый CLI
+    /// квоту не тратит, и снимок всё ещё точен.
+    #[test]
+    fn a_short_pause_in_agy_is_not_staleness() {
+        let snapshot = snapshot_from_payload(SAMPLE, 1_000).unwrap().unwrap();
+        // Самое короткое окно — пятичасовое.
+        assert_eq!(stale_threshold(&snapshot.windows, 900), 5 * 3_600);
+    }
+
+    #[test]
+    fn a_snapshot_without_durations_falls_back_to_the_global_threshold() {
+        let raw = r#"{"quota": {"future-pool": {"remaining_fraction": 0.5}}}"#;
+        let snapshot = snapshot_from_payload(raw, 1_000).unwrap().unwrap();
+        assert_eq!(stale_threshold(&snapshot.windows, 900), 900);
+    }
+
+    /// Глобальная настройка остаётся нижней границей: ослабить её окном нельзя.
+    #[test]
+    fn the_global_threshold_is_a_floor() {
+        let snapshot = snapshot_from_payload(SAMPLE, 1_000).unwrap().unwrap();
+        assert_eq!(stale_threshold(&snapshot.windows, 86_400), 86_400);
     }
 
     /// Строка внутри `agy` обязана показывать то же, что и панель.
