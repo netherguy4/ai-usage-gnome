@@ -4,8 +4,9 @@
 
 - **Claude Code** — тариф, почта и все лимиты аккаунта: 5-часовой, недельный и отдельные лимиты моделей;
 - **Codex** — тариф/email, остаток короткого и недельного лимитов;
+- **Google Antigravity (`agy`)** — тариф, email, активная модель и все пулы квоты из официального status-line payload;
 - **DeepSeek API** — доступный баланс;
-- любое количество профилей через отдельные `CLAUDE_CONFIG_DIR` и `CODEX_HOME`.
+- любое количество профилей через отдельные `CLAUDE_CONFIG_DIR`, `CODEX_HOME` и отдельные ID hook-снимков `agy`.
 
 Проект состоит из маленького GNOME Shell extension на GJS и фонового Rust-сервиса. Расширение не делает сетевых запросов и читает только локальный `state.json`.
 
@@ -60,7 +61,7 @@ cd ai-usage-gnome
 ai-usage setup
 ```
 
-Он умеет добавлять или обновлять Claude, Codex и DeepSeek. Повторный ID заменяет существующую запись.
+Он умеет добавлять или обновлять Claude, Codex и DeepSeek. Antigravity пока добавляется отдельной CLI-командой, потому что после неё нужно подключить hook внутри `agy`. Повторный ID заменяет существующую запись.
 
 Те же действия без диалога — например, для скриптов и dotfiles:
 
@@ -68,12 +69,13 @@ ai-usage setup
 ai-usage account list
 ai-usage account add codex  --id codex-work --name "Codex Work" --codex-home ~/.codex-work
 ai-usage account add claude --id claude-main --config-dir ~/.claude
+ai-usage account add antigravity --id agy-main --name "Google AI Pro" --hook
 printf '%s' "$DEEPSEEK_KEY" | ai-usage account add deepseek --id ds --api-key-stdin
 ai-usage account rename codex-work "Codex рабочий"
 ai-usage account remove codex-work
 ```
 
-Удаление Claude-аккаунта возвращает прежний `statusLine`. Два аккаунта одного провайдера с общим каталогом отклоняются: они дрались бы за один профиль.
+Удаление Claude-аккаунта возвращает прежний `statusLine`. Для Antigravity удаляется только созданный wrapper-скрипт: настройки `agy` не переписываются автоматически. Два аккаунта одного провайдера с общим каталогом отклоняются: они дрались бы за один профиль.
 
 Частота обновления и порог устаревания:
 
@@ -89,6 +91,48 @@ ai-usage doctor
 ai-usage once
 journalctl --user -u ai-usage.service -f
 ```
+
+### Google Antigravity (`agy`)
+
+Интеграция использует официальный custom status line интерфейс Antigravity CLI. `agy` сам передаёт скрипту JSON с `quota`, `plan_tier`, `email` и активной моделью. AI Usage не читает системный keyring, OAuth-токены и не вызывает внутренние Google API.
+
+Добавь аккаунт и создай wrapper:
+
+```bash
+ai-usage account add antigravity --id agy-main --name "Google AI Pro" --hook
+```
+
+Команда напечатает путь вроде:
+
+```text
+~/.config/ai-usage/hooks/agy-agy-main.sh
+```
+
+Внутри `agy` подключи его:
+
+```text
+/statusline ~/.config/ai-usage/hooks/agy-agy-main.sh
+```
+
+Чтобы сохранить встроенную строку `agy` и добавить строку AI Usage второй строкой, в `~/.gemini/antigravity-cli/settings.json` выставь:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.config/ai-usage/hooks/agy-agy-main.sh",
+    "stack_with_default": true
+  }
+}
+```
+
+`/usage` и `/quota` принудительно обновляют квоту с backend. При обычной работе hook вызывается при изменениях состояния агента. Snapshot сохраняется атомарно с правами `600` в:
+
+```text
+$XDG_RUNTIME_DIR/ai-usage/antigravity-usage-agy-main.json
+```
+
+Если `agy` закрыт, сеть не опрашивается и snapshot не обновляется. После `stale_seconds` аккаунт получает `~` рядом с процентом и подсказку открыть `agy` или выполнить `/usage`. Неизвестные будущие пулы квоты сохраняются и появляются в меню без обновления приложения.
 
 ### Несколько Claude-аккаунтов
 
@@ -198,6 +242,7 @@ ai-usage config show|set       частота обновления и порог
 ai-usage doctor                диагностика
 ai-usage init                  создать пустой config.toml
 ai-usage claude-hook ...       необязательный status line внутри Claude Code
+ai-usage agy-hook ...          официальный status line hook Antigravity CLI
 ai-usage restore-claude-hooks  восстановить Claude settings.json
 ```
 
@@ -211,14 +256,14 @@ ai-usage restore-claude-hooks  восстановить Claude settings.json
 
 1. если исчерпан любой **общий** лимит — `0%`, потому что запас в коротком окне уже ничего не значит;
 2. иначе пятичасовой лимит;
-3. если у тарифа его нет (Codex `plus`) — недельный;
+3. если у тарифа его нет — недельный или активный пул квоты;
 4. у провайдеров без лимитов, как DeepSeek, — баланс.
 
-Лимиты, привязанные к модели, из правила 1 исключены: исчерпанный лимит Fable не блокирует работу, достаточно переключить модель. Именно поэтому панель не берёт минимум по всем окнам подряд.
+Лимиты, привязанные к модели, из правила 1 исключены: исчерпанный лимит одной модели не блокирует работу, достаточно переключить модель. Antigravity помечает текущий quota-pool как активный, а остальные — как scoped. Именно поэтому панель не берёт минимум по всем окнам подряд.
 
 Остальные лимиты видны в меню. Строки «обновлено» там нет: возраст появляется только когда данные устарели, вместе с причиной.
 
-Кнопки «обновить» нет — данные обновляет фоновый сервис.
+Кнопки «обновить» нет — данные обновляет фоновый сервис или официальный hook провайдера.
 
 ## GitHub Actions
 
@@ -236,6 +281,8 @@ git push origin v0.1.0
 
 ## Используемые официальные интерфейсы
 
+- [Antigravity CLI status line](https://antigravity.google/docs/cli/statusline)
+- [Antigravity Model Quotas (`/usage`)](https://antigravity.google/docs/cli/commands/usage)
 - [Codex App Server](https://developers.openai.com/codex/app-server)
 - [Claude Code status line](https://code.claude.com/docs/en/statusline) — для необязательного `--hook`
 - [DeepSeek Get User Balance](https://api-docs.deepseek.com/api/get-user-balance)
