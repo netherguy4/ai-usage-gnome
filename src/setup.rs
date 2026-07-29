@@ -32,12 +32,14 @@ pub fn run() -> Result<()> {
         println!("  1) Claude Code");
         println!("  2) Codex");
         println!("  3) DeepSeek API");
-        println!("  4) Завершить");
-        match prompt("Выбор", Some("4"))?.as_str() {
+        println!("  4) Google Antigravity (agy)");
+        println!("  5) Завершить");
+        match prompt("Выбор", Some("5"))?.as_str() {
             "1" => add_claude(&mut config)?,
             "2" => add_codex(&mut config)?,
             "3" => add_deepseek(&mut config)?,
-            "4" | "" => break,
+            "4" => add_antigravity(&mut config)?,
+            "5" | "" => break,
             _ => println!("Неизвестный пункт."),
         }
     }
@@ -167,6 +169,31 @@ fn add_deepseek(config: &mut Config) -> Result<()> {
     );
     config::save(config)?;
     println!("Ключ сохранён в secrets.env с правами 600.");
+    Ok(())
+}
+
+fn add_antigravity(config: &mut Config) -> Result<()> {
+    println!("\nGoogle Antigravity (agy)");
+    let id = prompt("ID аккаунта", Some("agy-main"))?;
+    crate::util::validate_id(&id)?;
+    let name = prompt("Название в виджете", Some("Antigravity"))?;
+
+    config::upsert_account(
+        config,
+        AccountConfig::Antigravity {
+            id: id.clone(),
+            name,
+        },
+    );
+    config::save(config)?;
+
+    // Данные приходят не по сети, а из самого agy, поэтому без подключённого
+    // status line аккаунт так и останется в состоянии «ожидание».
+    let path = crate::providers::antigravity::install_hook_script(&id)?;
+    println!("\nHook создан: {}", path.display());
+    println!("Осталось выполнить внутри agy:");
+    println!("  /statusline {}", path.display());
+    println!("Чтобы сохранить и штатную строку agy, добавь stack_with_default=true в statusLine.");
     Ok(())
 }
 

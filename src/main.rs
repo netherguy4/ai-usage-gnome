@@ -6,6 +6,7 @@ mod util;
 
 use std::fs;
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::time::Duration;
 
@@ -13,14 +14,13 @@ use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use config::AccountConfig;
 use model::AppState;
-use std::path::PathBuf;
 use tokio::task::JoinSet;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "ai-usage",
     version,
-    about = "Claude, Codex and DeepSeek usage for GNOME"
+    about = "Claude, Codex, Antigravity and DeepSeek usage for GNOME"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -50,6 +50,11 @@ enum Commands {
         #[arg(long)]
         account: String,
     },
+    /// Antigravity CLI status-line hook. Reads official agy JSON from stdin.
+    AgyHook {
+        #[arg(long)]
+        account: String,
+    },
     /// Restore Claude settings changed by the setup command.
     RestoreClaudeHooks,
 }
@@ -61,10 +66,10 @@ enum AccountCommand {
     /// Add or update an account non-interactively.
     #[command(subcommand)]
     Add(AddCommand),
-    /// Remove an account. Claude accounts also get their statusLine restored.
+    /// Remove an account. Provider hook files are removed when applicable.
     Remove {
         id: String,
-        /// Leave the Claude statusLine hook in place.
+        /// Leave a provider hook in place.
         #[arg(long)]
         keep_hook: bool,
     },
@@ -108,6 +113,14 @@ enum AddCommand {
         #[arg(long)]
         api_key_stdin: bool,
     },
+    /// Google Antigravity / agy account fed by its official status-line JSON.
+    Antigravity {
+        #[command(flatten)]
+        common: CommonArgs,
+        /// Create a small wrapper script for the agy /statusline command.
+        #[arg(long)]
+        hook: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -127,7 +140,7 @@ enum ConfigCommand {
         /// How often the daemon refreshes providers.
         #[arg(long)]
         refresh_seconds: Option<u64>,
-        /// After how long Claude cache data counts as stale.
+        /// After how long provider cache data counts as stale.
         #[arg(long)]
         stale_seconds: Option<i64>,
     },
@@ -146,6 +159,7 @@ async fn main() -> Result<()> {
         Commands::Account(command) => account(command),
         Commands::Config(command) => configure(command),
         Commands::ClaudeHook { account } => claude_hook(&account),
+        Commands::AgyHook { account } => agy_hook(&account),
         Commands::RestoreClaudeHooks => setup::restore_claude_hooks(),
     }
 }
@@ -175,9 +189,14 @@ fn account(command: AccountCommand) -> Result<()> {
                         ..
                     } => format!("{}, bucket {limit_id}", codex_home.display()),
                     AccountConfig::Deepseek { api_key_env, .. } => api_key_env.clone(),
+                    AccountConfig::Antigravity { id, .. } => {
+                        providers::antigravity::snapshot_path(id)
+                            .display()
+                            .to_string()
+                    }
                 };
                 println!(
-                    "{:<16} {:<10} {:<20} {}",
+                    "{:<16} {:<12} {:<20} {}",
                     account.id(),
                     account.provider(),
                     account.name(),
@@ -202,12 +221,21 @@ fn account(command: AccountCommand) -> Result<()> {
             config = candidate;
 
             if install_hook {
-                if let Some(AccountConfig::Claude { config_dir, .. }) =
-                    config::find_account(&config, &id)
-                {
-                    let config_dir = config_dir.clone();
-                    setup::install_claude_status_line(&id, &config_dir)?;
-                    println!("Claude hook установлен в {}", config_dir.display());
+                match config::find_account(&config, &id) {
+                    Some(AccountConfig::Claude { config_dir, .. }) => {
+                        let config_dir = config_dir.clone();
+                        setup::install_claude_status_line(&id, &config_dir)?;
+                        println!("Claude hook установлен в {}", config_dir.display());
+                    }
+                    Some(AccountConfig::Antigravity { .. }) => {
+                        let path = providers::antigravity::install_hook_script(&id)?;
+                        println!("agy hook создан: {}", path.display());
+                        println!("В agy выполни: /statusline {}", path.display());
+                        println!(
+                            "Чтобы оставить стандартную строку agy, установи stack_with_default=true в statusLine."
+                        );
+                    }
+                    _ => {}
                 }
             }
 
@@ -225,13 +253,23 @@ fn account(command: AccountCommand) -> Result<()> {
             // восстановление оставило бы аккаунт и в конфиге, и без hook.
             config::save(&config)?;
 
-            if let AccountConfig::Claude { config_dir, .. } = &removed {
-                if keep_hook {
-                    println!("statusLine оставлен без изменений.");
-                } else {
-                    let outcome = setup::restore_claude_account(&id, config_dir)?;
-                    println!("Claude settings: {outcome:?}");
+            match &removed {
+                AccountConfig::Claude { config_dir, .. } => {
+                    if keep_hook {
+                        println!("statusLine оставлен без изменений.");
+                    } else {
+                        let outcome = setup::restore_claude_account(&id, config_dir)?;
+                        println!("Claude settings: {outcome:?}");
+                    }
                 }
+                AccountConfig::Antigravity { .. } => {
+                    if keep_hook {
+                        println!("agy hook оставлен без изменений.");
+                    } else if providers::antigravity::remove_hook_script(&id)? {
+                        println!("agy hook удалён.");
+                    }
+                }
+                _ => {}
             }
             println!("Аккаунт '{id}' удалён.");
             Ok(())
@@ -339,6 +377,18 @@ fn build_account(command: AddCommand) -> Result<Added> {
                 api_key_env,
                 base_url,
             }))
+        }
+        AddCommand::Antigravity { common, hook } => {
+            util::validate_id(&common.id)?;
+            Ok(Added {
+                account: AccountConfig::Antigravity {
+                    // Не «Google AI Pro»: это же значение приходит в
+                    // `plan_tier`, и заголовок меню читался бы дважды.
+                    name: common.name.unwrap_or_else(|| "Antigravity".to_owned()),
+                    id: common.id,
+                },
+                install_hook: hook,
+            })
         }
     }
 }
@@ -485,6 +535,19 @@ fn claude_hook(account: &str) -> Result<()> {
     Ok(())
 }
 
+/// Официальный custom status-line hook Antigravity CLI. Сохраняет только
+/// отображаемые поля quota, не читая keyring и OAuth-токены.
+fn agy_hook(account: &str) -> Result<()> {
+    util::validate_id(account)?;
+    let mut raw = String::new();
+    std::io::stdin().read_to_string(&mut raw)?;
+    println!(
+        "{}",
+        providers::antigravity::status_line_from_payload(account, &raw)?
+    );
+    Ok(())
+}
+
 fn doctor() -> Result<()> {
     let config_path = config::config_path()?;
     let config = config::load()?;
@@ -534,6 +597,23 @@ fn doctor() -> Result<()> {
                     .map(|value| !value.trim().is_empty())
                     .unwrap_or(false);
                 println!("{} DeepSeek '{}': {}", mark(present), name, api_key_env);
+            }
+            config::AccountConfig::Antigravity { id, name } => {
+                let agy = util::resolve_command("agy").is_some();
+                let snapshot = providers::antigravity::snapshot_path(id);
+                let hook = providers::antigravity::hook_script_path(id)?;
+                println!(
+                    "{} Antigravity '{}': agy={}, snapshot={}, hook={}",
+                    mark(agy && snapshot.exists()),
+                    name,
+                    if agy {
+                        "найден"
+                    } else {
+                        "не найден"
+                    },
+                    snapshot.display(),
+                    hook.display()
+                );
             }
         }
     }

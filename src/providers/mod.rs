@@ -1,3 +1,4 @@
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod deepseek;
@@ -30,6 +31,9 @@ pub async fn fetch(account: AccountConfig, stale_seconds: i64) -> AccountState {
             api_key_env,
             base_url,
         } => deepseek::fetch(&id, &name, &api_key_env, &base_url).await,
+        AccountConfig::Antigravity { id, name } => {
+            antigravity::fetch(&id, &name, stale_seconds).await
+        }
     };
 
     result.unwrap_or_else(|error| AccountState::error(&id, &name, provider, error.to_string()))
